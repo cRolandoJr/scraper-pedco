@@ -3,7 +3,6 @@
 
 # IGNORAR SECRETOS (¡CRÍTICO!)
 .env
-.env
 pedco-bot.exe
 debug_calendar.html
 pedco-bot-linux
