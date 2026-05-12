@@ -10,15 +10,13 @@ import (
 	"github.com/gocolly/colly/v2"
 )
 
-// PedcoScraper es nuestro adaptador que interactúa con la web de la universidad
 type PedcoScraper struct {
 	collector *colly.Collector
 	baseURL   string
 }
 
-// NewPedcoScraper es el constructor (factory) de nuestro adaptador
 func NewPedcoScraper() *PedcoScraper {
-	// Inicializamos Colly
+
 	c := colly.NewCollector(
 		// Los servidores web a veces bloquean bots. Le decimos a Colly que
 		// finja ser un navegador Chrome normal de Windows para pasar desapercibido.
@@ -70,41 +68,55 @@ func (s *PedcoScraper) Login(username, password string) error {
 }
 
 // FetchEvents navega a la página del calendario y extrae las fechas límite
-// FetchEvents navega a la página del calendario y extrae las fechas límite
 func (s *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 	var events []domain.Event
 	calendarURL := s.baseURL + "/calendar/view.php?view=upcoming"
 
-	// NUEVA REGLA DE EXTRACCIÓN: Buscamos el div contenedor del evento
-	s.collector.OnHTML("div[data-type='event'][data-event-component='mod_assign']", func(e *colly.HTMLElement) {
+	// NUEVA ESTRATEGIA: Escaneamos todos los contenedores de tipo 'event'
+	s.collector.OnHTML("div[data-type='event']", func(e *colly.HTMLElement) {
+
+		title := e.ChildText("h3.name")
+		titleLower := strings.ToLower(title) // Convertimos a minúsculas para comparar fácil
+		component := e.Attr("data-event-component")
+
+		// Definimos qué nos interesa capturar
+		esTarea := component == "mod_assign"
+		esCuestionario := component == "mod_quiz"
+		esExamen := strings.Contains(titleLower, "parcial") ||
+			strings.Contains(titleLower, "examen") ||
+			strings.Contains(titleLower, "recuperatorio")
+
+		// Si no es ninguna de las anteriores, ignoramos el evento
+		if !esTarea && !esCuestionario && !esExamen {
+			return
+		}
+
+		// Determinamos el tipo de etiqueta para el mensaje
+		tipoEvento := "📌 Evento"
+		if esTarea {
+			tipoEvento = "📝 Tarea"
+		} else if esCuestionario || esExamen {
+			tipoEvento = "🔥 EXAMEN / PARCIAL"
+		}
 
 		eventID := e.Attr("data-event-id")
-		title := e.ChildText("h3.name")
 		courseName := e.ChildText("div.row a[href*='course/view.php']")
 		linkEntrega := e.ChildAttr("div.card-footer a", "href")
 
-		// NUEVO: La magia de GoQuery a través de Colly
-		// 1. Busca el relojito (i.fa-clock-o)
-		// 2. Sube a la fila contenedora (.Closest(".row"))
-		// 3. Busca la columna con el texto (.Find(".col-11"))
-		// 4. Extrae todo el texto adentro (.Text())
 		fechaCruda := e.DOM.Find("i.fa-clock-o").Closest(".row").Find(".col-11").Text()
-
-		// Pro-tip: El HTML web suele traer saltos de línea ocultos o espacios de sobra.
-		// TrimSpace lo deja limpio.
 		fechaLimpia := strings.TrimSpace(fechaCruda)
 
 		event := domain.Event{
 			ID:      eventID,
 			Title:   title,
-			Type:    "Trabajo Práctico",
+			Type:    tipoEvento,
 			Course:  courseName,
-			DueDate: fechaLimpia, // Asignamos la fecha real
-			Link:    linkEntrega, // Asignamos el link real
+			DueDate: fechaLimpia,
+			Link:    linkEntrega,
 		}
 
 		events = append(events, event)
-		log.Printf("✅ Evento capturado: %s - Vence: %s", title, fechaLimpia)
+		log.Printf("✅ [%s] detectado: %s", tipoEvento, title)
 	})
 
 	log.Println("Visitando el calendario...")
