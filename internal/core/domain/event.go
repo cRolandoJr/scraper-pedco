@@ -6,6 +6,6 @@ type Event struct {
 	Title   string
 	Course  string
 	Type    string
-	DueDate string // Aquí guardaremos "lunes, 18 mayo, 23:55"
-	Link    string // Aquí guardaremos "https://pedco..."
+	DueDate string
+	Link    string
 }
