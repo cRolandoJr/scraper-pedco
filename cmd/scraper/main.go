@@ -62,6 +62,10 @@ func main() {
 			ev.Title, ev.Course, ev.DueDate, ev.Link)
 	}
 
+	// Agregamos un separador sutil y la firma como un enlace integrado
+	mensaje += "---\n"
+	mensaje += "🤖 *PedcoBot* | [Desarrollado por Rolando Cobis](https://linkedin.com/in/rolando-cobis-jr)"
+
 	// 5. ENVIAR NOTIFICACIÓN
 	log.Println("Enviando mensaje push al teléfono...")
 	err = notifier.SendPush(mensaje)
