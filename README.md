@@ -1,5 +1,9 @@
 #  Pedco Notification Bot (UNComa)
 
+[![Descargar v1.0.0](https://img.shields.io/badge/Descargar-Última_Versión-blue?style=for-the-badge&logo=github)](https://github.com/cRolandojr/scraper-pedco/releases/latest)
+
+> **¡Descarga rápida!** Si solo quieres usar el bot, haz clic en el botón azul de arriba y descarga el archivo `.zip` correspondiente a tu sistema operativo (Windows o Linux).
+
 Un microservicio de backend desarrollado en **Go** diseñado para automatizar el seguimiento de actividades en la plataforma Pedco de la Universidad Nacional del Comahue. Extrae fechas de entrega de Trabajos Prácticos y exámenes, enviando notificaciones push directamente a tu Telegram.
 
 
