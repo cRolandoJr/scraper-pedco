@@ -1,10 +1,5 @@
-# Ignorar binarios compilados
-/pedco-scraper
-
-# IGNORAR SECRETOS (¡CRÍTICO!)
 .env
 pedco-bot.exe
-debug_calendar.html
 pedco-bot-linux
-pedco-bot-linux.zip
-pedco-bot-windows.zip
+*.zip
+plantilla.env
