@@ -1,0 +1,8 @@
+# Ignorar binarios compilados
+/pedco-scraper
+
+# IGNORAR SECRETOS (¡CRÍTICO!)
+.env
+.env
+pedco-bot.exe
+debug_calendar.html

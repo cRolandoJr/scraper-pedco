@@ -3,6 +3,9 @@ package pedco
 import (
 	"fmt"
 	"log"
+	"strings"
+
+	"scraper-pedco/internal/core/domain"
 
 	"github.com/gocolly/colly/v2"
 )
@@ -67,42 +70,43 @@ func (s *PedcoScraper) Login(username, password string) error {
 }
 
 // FetchEvents navega a la página del calendario y extrae las fechas límite
+// FetchEvents navega a la página del calendario y extrae las fechas límite
 func (s *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 	var events []domain.Event
-
-	// Usualmente esta es la URL en Moodle para ver los eventos próximos.
-	// Quizás tengas que ajustarla si en Pedco es ligeramente distinta (ej. /calendar/view.php?view=upcoming)
 	calendarURL := s.baseURL + "/calendar/view.php?view=upcoming"
 
-	// REGLA DE EXTRACCIÓN: Le decimos a Colly que busque el selector exacto que encontraste
-	// li[data-region='event-item'][data-event-eventtype='due']
-	// Esto significa: "Busca un elemento <li> que sea un ítem de evento Y que su tipo sea 'due' (vencimiento)"
-	s.collector.OnHTML("li[data-region='event-item'][data-event-eventtype='due']", func(e *colly.HTMLElement) {
+	// NUEVA REGLA DE EXTRACCIÓN: Buscamos el div contenedor del evento
+	s.collector.OnHTML("div[data-type='event'][data-event-component='mod_assign']", func(e *colly.HTMLElement) {
 
-		// 1. Extraemos la URL del evento buscando el atributo "href" de la etiqueta <a> interna
-		eventURL := e.ChildAttr("a", "href")
+		eventID := e.Attr("data-event-id")
+		title := e.ChildText("h3.name")
+		courseName := e.ChildText("div.row a[href*='course/view.php']")
+		linkEntrega := e.ChildAttr("div.card-footer a", "href")
 
-		// 2. Extraemos el ID único del evento
-		eventID := e.ChildAttr("a", "data-event-id")
+		// NUEVO: La magia de GoQuery a través de Colly
+		// 1. Busca el relojito (i.fa-clock-o)
+		// 2. Sube a la fila contenedora (.Closest(".row"))
+		// 3. Busca la columna con el texto (.Find(".col-11"))
+		// 4. Extrae todo el texto adentro (.Text())
+		fechaCruda := e.DOM.Find("i.fa-clock-o").Closest(".row").Find(".col-11").Text()
 
-		// 3. Extraemos el texto visible (el título) buscando dentro del span con clase "eventname"
-		title := e.ChildText("span.eventname")
+		// Pro-tip: El HTML web suele traer saltos de línea ocultos o espacios de sobra.
+		// TrimSpace lo deja limpio.
+		fechaLimpia := strings.TrimSpace(fechaCruda)
 
-		// Creamos nuestra entidad de Dominio con los datos raspados
 		event := domain.Event{
-			ID:     eventID,
-			Title:  title,
-			Type:   "TP/Vencimiento", // Sabemos que es un vencimiento por el 'due'
-			Course: eventURL,         // Por ahora guardamos la URL aquí para tener el link directo
-			// DueDate: ¡OJO AQUÍ!
+			ID:      eventID,
+			Title:   title,
+			Type:    "Trabajo Práctico",
+			Course:  courseName,
+			DueDate: fechaLimpia, // Asignamos la fecha real
+			Link:    linkEntrega, // Asignamos el link real
 		}
 
-		// Agregamos este evento a nuestra lista
 		events = append(events, event)
-		log.Printf("Evento encontrado: %s", title)
+		log.Printf("✅ Evento capturado: %s - Vence: %s", title, fechaLimpia)
 	})
 
-	// Ejecutamos la visita. Como ya hicimos Login antes, Colly enviará las cookies automáticamente.
 	log.Println("Visitando el calendario...")
 	err := s.collector.Visit(calendarURL)
 	if err != nil {
