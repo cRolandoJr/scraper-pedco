@@ -39,7 +39,7 @@ func asistenteConfiguracion() {
 		chatID, _ := reader.ReadString('\n')
 		chatID = strings.TrimSpace(chatID)
 
-		tokenFijo := "8029093477:AAFrUMOVMrKZHZbc15J7ttTS10YB2YAN0Rc"
+		tokenFijo := "ID-bot"
 
 		envContent := fmt.Sprintf("PEDCO_USER=%s\nPEDCO_PASS=%s\nTG_TOKEN=%s\nTG_CHAT_ID=%s\n", user, pass, tokenFijo, chatID)
 
