@@ -12,9 +12,9 @@ var ErrSessionExpired = errors.New("sesión expirada")
 
 // Scraper define el contrato para cualquier fuente de eventos.
 type Scraper interface {
-	Login(user, pass string) error
+	Login(username, password string) error
 	FetchEvents() ([]domain.Event, error)
-	LoadSession(blob string) error
+	LoadSession(sessionBlob string) error
 	SessionBlob() (string, error)
 }
 
@@ -22,9 +22,9 @@ type ScraperFactory func() Scraper
 
 // UserRepository abstrae la persistencia de credenciales y sesiones.
 type UserRepository interface {
-	GetUser(chatID int64) (user, pass string, err error)
+	GetUser(chatID int64) (username, password string, err error)
 	GetAllUsers() ([]UserCredentials, error)
-	SaveSession(chatID int64, blob string) error
+	SaveSession(chatID int64, sessionBlob string) error
 	ClearSession(chatID int64) error
 }
 
