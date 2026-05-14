@@ -54,7 +54,11 @@ func (f *loginFlow) getState(chatID int64) string {
 	return f.state[chatID]
 }
 
-		tokenFijo := "ID-bot"
+func (f *loginFlow) setTempUser(chatID int64, user string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tempUser[chatID] = user
+}
 
 func (f *loginFlow) consume(chatID int64) (user string, ok bool) {
 	f.mu.Lock()
