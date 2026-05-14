@@ -4,126 +4,109 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"scraper-pedco/internal/core/domain"
 
 	"github.com/gocolly/colly/v2"
 )
 
+const (
+	baseURL        = "https://pedco.uncoma.edu.ar"
+	requestTimeout = 15 * time.Second
+	userAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
+)
+
 type PedcoScraper struct {
 	collector *colly.Collector
-	baseURL   string
 }
 
 func NewPedcoScraper() *PedcoScraper {
-
-	c := colly.NewCollector(
-		// Los servidores web a veces bloquean bots. Le decimos a Colly que
-		// finja ser un navegador Chrome normal de Windows para pasar desapercibido.
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"),
-	)
-
-	return &PedcoScraper{
-		collector: c,
-		baseURL:   "https://pedco.uncoma.edu.ar",
-	}
+	c := colly.NewCollector(colly.UserAgent(userAgent))
+	c.SetRequestTimeout(requestTimeout)
+	return &PedcoScraper{collector: c}
 }
 
-// Login implementa la primera parte de nuestro puerto (interfaz)
 func (s *PedcoScraper) Login(username, password string) error {
-	loginURL := s.baseURL + "/login/index.php"
-	var loginToken string
+	loginURL := baseURL + "/login/index.php"
 
-	// REGLA 1: Le decimos a Colly qué hacer cuando vea cierta etiqueta HTML.
-	// En Moodle, el token está en un input escondido: <input type="hidden" name="logintoken" value="texto_aleatorio">
+	var loginToken string
 	s.collector.OnHTML("input[name='logintoken']", func(e *colly.HTMLElement) {
 		loginToken = e.Attr("value")
-		log.Println("Token de seguridad capturado:", loginToken)
 	})
 
-	// REGLA 2: Ahora que Colly sabe qué buscar, visitamos la página.
-	err := s.collector.Visit(loginURL)
-	if err != nil {
-		return fmt.Errorf("fallo al visitar la página de login: %w", err)
+	if err := s.collector.Visit(loginURL); err != nil {
+		return fmt.Errorf("fallo al visitar página de login: %w", err)
 	}
-
 	if loginToken == "" {
-		return fmt.Errorf("no se pudo encontrar el token de login. ¿Cambió el diseño de Pedco?")
+		return fmt.Errorf("no se pudo encontrar logintoken (¿cambió layout de Pedco?)")
 	}
 
-	// REGLA 3: Enviamos nuestras credenciales junto con el token.
-	// Colly guardará la cookie de sesión automáticamente de aquí en adelante.
-	err = s.collector.Post(loginURL, map[string]string{
+	err := s.collector.Post(loginURL, map[string]string{
 		"username":   username,
 		"password":   password,
 		"logintoken": loginToken,
 	})
-
 	if err != nil {
-		return fmt.Errorf("error al enviar el formulario: %w", err)
+		return fmt.Errorf("error enviando formulario login: %w", err)
 	}
-
-	log.Println("Login exitoso. El scraper ahora tiene acceso a tus cursos.")
+	log.Println("Login exitoso.")
 	return nil
 }
 
-// FetchEvents navega a la página del calendario y extrae las fechas límite
 func (s *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 	var events []domain.Event
-	calendarURL := s.baseURL + "/calendar/view.php?view=upcoming"
+	calendarURL := baseURL + "/calendar/view.php?view=upcoming"
 
-	// NUEVA ESTRATEGIA: Escaneamos todos los contenedores de tipo 'event'
-	s.collector.OnHTML("div[data-type='event']", func(e *colly.HTMLElement) {
-
-		title := e.ChildText("h3.name")
-		titleLower := strings.ToLower(title) // Convertimos a minúsculas para comparar fácil
-		component := e.Attr("data-event-component")
-
-		// Definimos qué nos interesa capturar
-		esTarea := component == "mod_assign"
-		esCuestionario := component == "mod_quiz"
-		esExamen := strings.Contains(titleLower, "parcial") ||
-			strings.Contains(titleLower, "examen") ||
-			strings.Contains(titleLower, "recuperatorio")
-
-		// Si no es ninguna de las anteriores, ignoramos el evento
-		if !esTarea && !esCuestionario && !esExamen {
+	// Clone hereda cookies de sesión pero aísla el callback OnHTML
+	// para no acumular handlers entre invocaciones repetidas.
+	pageCollector := s.collector.Clone()
+	pageCollector.OnHTML("div[data-type='event']", func(e *colly.HTMLElement) {
+		ev, ok := parseEvent(e)
+		if !ok {
 			return
 		}
-
-		// Determinamos el tipo de etiqueta para el mensaje
-		tipoEvento := "📌 Evento"
-		if esTarea {
-			tipoEvento = "📝 Tarea"
-		} else if esCuestionario || esExamen {
-			tipoEvento = "🔥 EXAMEN / PARCIAL"
-		}
-
-		eventID := e.Attr("data-event-id")
-		courseName := e.ChildText("div.row a[href*='course/view.php']")
-		linkEntrega := e.ChildAttr("div.card-footer a", "href")
-
-		fechaCruda := e.DOM.Find("i.fa-clock-o").Closest(".row").Find(".col-11").Text()
-		fechaLimpia := strings.TrimSpace(fechaCruda)
-
-		event := domain.Event{
-			ID:      eventID,
-			Title:   title,
-			Type:    tipoEvento,
-			Course:  courseName,
-			DueDate: fechaLimpia,
-			Link:    linkEntrega,
-		}
-
-		events = append(events, event)
-		log.Printf("✅ [%s] detectado: %s", tipoEvento, title)
+		events = append(events, ev)
+		log.Printf("✅ [%s] %s", ev.Type, ev.Title)
 	})
 
-	log.Println("Visitando el calendario...")
-	err := s.collector.Visit(calendarURL)
-	if err != nil {
-		return nil, fmt.Errorf("error al visitar el calendario: %w", err)
+	if err := pageCollector.Visit(calendarURL); err != nil {
+		return nil, fmt.Errorf("error visitando calendario: %w", err)
+	}
+	return events, nil
+}
+
+func parseEvent(e *colly.HTMLElement) (domain.Event, bool) {
+	title := e.ChildText("h3.name")
+	titleLower := strings.ToLower(title)
+	component := e.Attr("data-event-component")
+
+	esTarea := component == "mod_assign"
+	esCuestionario := component == "mod_quiz"
+	esExamen := strings.Contains(titleLower, "parcial") ||
+		strings.Contains(titleLower, "examen") ||
+		strings.Contains(titleLower, "recuperatorio")
+
+	if !esTarea && !esCuestionario && !esExamen {
+		return domain.Event{}, false
 	}
 
-	return events, nil
+	tipo := "📌 Evento"
+	switch {
+	case esTarea:
+		tipo = "📝 Tarea"
+	case esCuestionario || esExamen:
+		tipo = "🔥 EXAMEN / PARCIAL"
+	}
+
+	fechaCruda := e.DOM.Find("i.fa-clock-o").Closest(".row").Find(".col-11").Text()
+
+	return domain.Event{
+		ID:      e.Attr("data-event-id"),
+		Title:   title,
+		Type:    tipo,
+		Course:  e.ChildText("div.row a[href*='course/view.php']"),
+		DueDate: strings.TrimSpace(fechaCruda),
+		Link:    e.ChildAttr("div.card-footer a", "href"),
+	}, true
 }
