@@ -1,28 +1,89 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/robfig/cron/v3"
 	tele "gopkg.in/telebot.v3"
 
-	// IMPORTAMOS NUESTROS ADAPTADORES
 	"scraper-pedco/internal/adapters/pedco"
 	"scraper-pedco/internal/adapters/storage"
+	"scraper-pedco/internal/core/ports"
+	"scraper-pedco/internal/core/service"
 )
 
-var userState = make(map[int64]string)
-var tempUser = make(map[int64]string)
+// loginFlow protege el estado conversacional contra accesos concurrentes
+// (Telebot dispara handlers en goroutines).
+type loginFlow struct {
+	mu        sync.Mutex
+	state     map[int64]string
+	tempUser  map[int64]string
+	createdAt map[int64]time.Time
+}
+
+const loginFlowTTL = 5 * time.Minute
+
+func newLoginFlow() *loginFlow {
+	return &loginFlow{
+		state:     make(map[int64]string),
+		tempUser:  make(map[int64]string),
+		createdAt: make(map[int64]time.Time),
+	}
+}
+
+func (f *loginFlow) setState(chatID int64, s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state[chatID] = s
+	f.createdAt[chatID] = time.Now()
+}
+
+func (f *loginFlow) getState(chatID int64) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.createdAt[chatID]; ok && time.Since(t) > loginFlowTTL {
+		delete(f.state, chatID)
+		delete(f.tempUser, chatID)
+		delete(f.createdAt, chatID)
+		return ""
+	}
+	return f.state[chatID]
+}
+
+func (f *loginFlow) setTempUser(chatID int64, user string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tempUser[chatID] = user
+}
+
+func (f *loginFlow) consume(chatID int64) (user string, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	user, ok = f.tempUser[chatID]
+	delete(f.state, chatID)
+	delete(f.tempUser, chatID)
+	delete(f.createdAt, chatID)
+	return
+}
+
+// telegramSender implementa service.MessageSender.
+type telegramSender struct{ bot *tele.Bot }
+
+func (t *telegramSender) Send(chatID int64, msg string) error {
+	_, err := t.bot.Send(&tele.User{ID: chatID}, msg, &tele.SendOptions{
+		ParseMode:             tele.ModeMarkdown,
+		DisableWebPagePreview: true,
+	})
+	return err
+}
 
 func main() {
-	storage.InitDB()
-
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Aviso: No se encontró archivo .env local, usando variables del sistema")
+	if err := godotenv.Load(); err != nil {
+		log.Println("Aviso: No se encontró archivo .env local")
 	}
 
 	token := os.Getenv("TG_TOKEN")
@@ -30,122 +91,114 @@ func main() {
 		log.Fatal("❌ Error: TG_TOKEN no está definido")
 	}
 
-	pref := tele.Settings{
+	storage.InitDB()
+
+	b, err := tele.NewBot(tele.Settings{
 		Token:  token,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
-	}
-
-	b, err := tele.NewBot(pref)
+	})
 	if err != nil {
 		log.Fatal("❌ Error al iniciar Telebot:", err)
-		return
 	}
 
-	// ---------------------------------------------------------
-	// COMANDOS DEL BOT
-	// ---------------------------------------------------------
+	// Wiring dependencias (composición sobre herencia).
+	repo := storage.NewRepository()
+	scraperFactory := ports.ScraperFactory(func() ports.Scraper { return pedco.NewPedcoScraper() })
+	sender := &telegramSender{bot: b}
+	notifier := service.NewNotifier(repo, scraperFactory, sender)
 
+	flow := newLoginFlow()
+
+	// Cron: Argentina, 8:00 y 20:00.
+	argLocation, err := time.LoadLocation("America/Argentina/Buenos_Aires")
+	if err != nil {
+		log.Fatal("❌ Error cargando zona horaria:", err)
+	}
+	c := cron.New(cron.WithLocation(argLocation))
+	if _, err := c.AddFunc("0 8,20 * * *", notifier.NotifyAll); err != nil {
+		log.Fatal("❌ Cron expression inválida:", err)
+	}
+	c.Start()
+	log.Println("⏱️  Cron activado (8:00 AM y 8:00 PM - Argentina)")
+
+	registerHandlers(b, notifier, flow)
+
+	log.Println("🚀 Bot escuchando a Telegram...")
+	b.Start()
+}
+
+func registerHandlers(b *tele.Bot, notifier *service.Notifier, flow *loginFlow) {
 	b.Handle("/start", func(c tele.Context) error {
-		mensaje := "🎓 *¡Hola! Soy el Bot de Pedco UNComa.*\n\n" +
-			"Puedo revisar la plataforma por ti y avisarte de tus entregas.\n\n" +
-			"👉 Usa /login para vincular tu cuenta.\n" +
-			"👉 Usa /tps para revisar tus entregas pendientes."
-		return c.Send(mensaje, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+		return c.Send(welcomeMessage(), markdownOpts())
 	})
 
 	b.Handle("/login", func(c tele.Context) error {
-		chatID := c.Sender().ID
-		userState[chatID] = "esperando_usuario"
-		return c.Send("¡Perfecto! Vamos a vincular tu cuenta.\n\n👤 Por favor, escríbeme tu **Usuario o Legajo** de Pedco:", &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+		flow.setState(c.Sender().ID, "esperando_usuario")
+		return c.Send("¡Perfecto! Vamos a vincular tu cuenta.\n\n👤 Escríbeme tu **Usuario o Legajo** de Pedco:", markdownOpts())
 	})
 
-	// NUEVO COMANDO: Borrar credenciales (Ética y Seguridad)
 	b.Handle("/borrar", func(c tele.Context) error {
-		chatID := c.Sender().ID
-		// Aquí podríamos hacer un storage.DeleteUser(chatID), pero por ahora lo sobrescribimos con texto vacío
-		storage.SaveUser(chatID, "", "")
-		return c.Send("🗑️ Tus credenciales han sido eliminadas de mi base de datos.")
+		if err := storage.DeleteUser(c.Sender().ID); err != nil {
+			return c.Send("ℹ️ No tenías datos guardados.")
+		}
+		return c.Send("🗑️ Tus credenciales fueron eliminadas.")
 	})
 
-	// NUEVO COMANDO: Hacer el Scraping a demanda
 	b.Handle("/tps", func(c tele.Context) error {
-		chatID := c.Sender().ID
-
-		// 1. Buscamos al usuario en la BD
-		usuario, password, err := storage.GetUser(chatID)
-		if err != nil || usuario == "" {
-			return c.Send("❌ No encontré tus credenciales. Por favor, usa /login primero.")
-		}
-
-		// 2. Avisamos que el proceso inició (el scraping demora unos segundos)
-		c.Send("⏳ Conectando con Pedco... Revisando el calendario...")
-
-		// 3. Iniciamos el scraper con las credenciales de ESTA persona
-		scraper := pedco.NewPedcoScraper()
-		err = scraper.Login(usuario, password)
+		msg, err := notifier.NotifyOne(c.Sender().ID)
 		if err != nil {
-			log.Printf("Error de login para ChatID %d: %v", chatID, err)
-			return c.Send("❌ Falló el inicio de sesión. ¿Tus credenciales son correctas? Usa /login para actualizarlas.")
+			return c.Send("❌ No tienes credenciales válidas. Usa /login.")
 		}
-
-		events, err := scraper.FetchEvents()
-		if err != nil {
-			log.Printf("Error extrayendo eventos para ChatID %d: %v", chatID, err)
-			return c.Send("❌ Hubo un error al leer la plataforma. Pedco podría estar caído.")
+		if msg == "" {
+			return c.Send("✅ ¡No tienes entregas pendientes! Relájate.")
 		}
-
-		// 4. Si no hay eventos, lo felicitamos
-		if len(events) == 0 {
-			return c.Send("✅ ¡Estás al día! No tienes trabajos prácticos ni parciales próximos.")
-		}
-
-		// 5. Si hay eventos, armamos el mensaje y lo enviamos
-		mensaje := "📚 *Tus Próximos Eventos en Pedco:*\n\n"
-		for _, ev := range events {
-			mensaje += fmt.Sprintf("%s *%s*\n📘 Materia: %s\n⏰ Vence: %s\n🔗 [Ir a Pedco](%s)\n\n",
-				ev.Type, ev.Title, ev.Course, ev.DueDate, ev.Link)
-		}
-
-		// DisableWebPagePreview evita que Telegram genere miniaturas gigantes por cada link
-		return c.Send(mensaje, &tele.SendOptions{ParseMode: tele.ModeMarkdown, DisableWebPagePreview: true})
+		return c.Send(msg, markdownOpts())
 	})
-
-	// ---------------------------------------------------------
-	// MÁQUINA DE ESTADOS (Manejador de Texto)
-	// ---------------------------------------------------------
 
 	b.Handle(tele.OnText, func(c tele.Context) error {
 		chatID := c.Sender().ID
-		textoRecibido := c.Text()
-		estadoActual := userState[chatID]
-
-		switch estadoActual {
+		switch flow.getState(chatID) {
 		case "esperando_usuario":
-			tempUser[chatID] = textoRecibido
-			userState[chatID] = "esperando_pass"
-			return c.Send("✅ Registrado. Ahora, escríbeme tu **Contraseña** de Pedco:", &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+			flow.setTempUser(chatID, c.Text())
+			flow.setState(chatID, "esperando_pass")
+			return c.Send("✅ Usuario recibido.\n\n🔑 Ahora escríbeme tu <b>Contraseña</b> de Pedco:\n<i>(Se guarda cifrada con AES-256)</i>", &tele.SendOptions{ParseMode: tele.ModeHTML})
 
 		case "esperando_pass":
-			usuario := tempUser[chatID]
-			password := textoRecibido
-
-			err := storage.SaveUser(chatID, usuario, password)
-			if err != nil {
+			usuario, ok := flow.consume(chatID)
+			if !ok {
+				return c.Send("⚠️ Sesión expirada. Usa /login nuevamente.")
+			}
+			if err := storage.SaveUser(chatID, usuario, c.Text()); err != nil {
 				log.Println("Error guardando en DB:", err)
 				return c.Send("❌ Hubo un error guardando tus datos.")
 			}
-
-			delete(userState, chatID)
-			delete(tempUser, chatID)
-
-			mensajeExito := fmt.Sprintf("🎉 ¡Cuenta vinculada!\nUsuario: %s\n\n👉 Ya puedes usar el comando /tps para ver tus entregas.", usuario)
-			return c.Send(mensajeExito)
+			return c.Send("🎉 ¡Cuenta vinculada! Usá /tps para ver tus entregas.")
 
 		default:
-			return c.Send("No entendí ese comando. Usa /start para ver el menú.")
+			return c.Send(helpMessage(), &tele.SendOptions{ParseMode: tele.ModeHTML})
 		}
 	})
+}
 
-	log.Println("🚀 Servidor interactivo iniciado. Escuchando a Telegram...")
-	b.Start()
+func markdownOpts() *tele.SendOptions {
+	return &tele.SendOptions{ParseMode: tele.ModeMarkdown, DisableWebPagePreview: true}
+}
+
+func welcomeMessage() string {
+	return "🎓 *¡Hola! Soy el Bot de Pedco UNComa.*\n\n" +
+		"Puedo revisar la plataforma por ti y avisarte de tus entregas.\n\n" +
+		"👉 Usa /login para vincular tu cuenta.\n" +
+		"👉 Usa /tps para revisar tus entregas pendientes.\n\n" +
+		"---\n" +
+		"👨‍💻 *Desarrollado por [Rolando Cobis](https://linkedin.com/in/rolando-cobis-jr)*"
+}
+
+func helpMessage() string {
+	return "🤔 <b>No reconocí ese comando o mensaje.</b>\n\n" +
+		"Comandos disponibles:\n\n" +
+		"👉 /login - Vincular o actualizar tu cuenta de Pedco.\n" +
+		"👉 /tps - Revisar tus entregas pendientes ahora.\n" +
+		"👉 /borrar - Eliminar tus datos del sistema.\n" +
+		"👉 /start - Ver el mensaje de bienvenida.\n\n" +
+		"💡 Revisión automática diaria: 8 AM y 8 PM (Argentina)."
 }

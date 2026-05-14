@@ -1,5 +1,22 @@
+# Secrets / env
 .env
+plantilla.env
+
+# Database (contiene credenciales cifradas - nunca commitear)
+*.db
+*.db-journal
+
+# Binarios compilados
+pedco-bot
 pedco-bot.exe
 pedco-bot-linux
+pedco-bot-windows
 *.zip
-plantilla.env
+
+# Artefactos debug
+debug_*.html
+
+# Go
+*.test
+*.out
+vendor/
