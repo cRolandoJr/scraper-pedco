@@ -1,12 +1,17 @@
 package pedco
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"scraper-pedco/internal/core/domain"
+	"scraper-pedco/internal/core/ports"
 
 	"github.com/gocolly/colly/v2"
 )
@@ -16,6 +21,10 @@ const (
 	requestTimeout = 15 * time.Second
 	userAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
 )
+
+// ErrSessionExpired re-exporta el sentinel del puerto para que callers que ya
+// importan este adapter no necesiten conocer la capa ports.
+var ErrSessionExpired = ports.ErrSessionExpired
 
 type PedcoScraper struct {
 	collector *colly.Collector
@@ -54,13 +63,46 @@ func (s *PedcoScraper) Login(username, password string) error {
 	return nil
 }
 
+// SessionBlob serializa las cookies actuales del scraper para persistir.
+func (s *PedcoScraper) SessionBlob() (string, error) {
+	cookies := s.collector.Cookies(baseURL)
+	if len(cookies) == 0 {
+		return "", errors.New("scraper sin cookies para serializar")
+	}
+	data, err := json.Marshal(cookies)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// LoadSession inyecta cookies previas. Llamar antes de FetchEvents para evitar login.
+func (s *PedcoScraper) LoadSession(blob string) error {
+	if blob == "" {
+		return errors.New("sesión vacía")
+	}
+	var cookies []*http.Cookie
+	if err := json.Unmarshal([]byte(blob), &cookies); err != nil {
+		return fmt.Errorf("blob de sesión corrupto: %w", err)
+	}
+	u, _ := url.Parse(baseURL)
+	return s.collector.SetCookies(u.String(), cookies)
+}
+
 func (s *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 	var events []domain.Event
+	var redirectedToLogin bool
 	calendarURL := baseURL + "/calendar/view.php?view=upcoming"
 
-	// Clone hereda cookies de sesión pero aísla el callback OnHTML
-	// para no acumular handlers entre invocaciones repetidas.
 	pageCollector := s.collector.Clone()
+
+	// Si Moodle redirige a /login, la sesión está muerta.
+	pageCollector.OnResponse(func(r *colly.Response) {
+		if strings.Contains(r.Request.URL.Path, "/login/") {
+			redirectedToLogin = true
+		}
+	})
+
 	pageCollector.OnHTML("div[data-type='event']", func(e *colly.HTMLElement) {
 		ev, ok := parseEvent(e)
 		if !ok {
@@ -72,6 +114,9 @@ func (s *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 
 	if err := pageCollector.Visit(calendarURL); err != nil {
 		return nil, fmt.Errorf("error visitando calendario: %w", err)
+	}
+	if redirectedToLogin {
+		return nil, ports.ErrSessionExpired
 	}
 	return events, nil
 }

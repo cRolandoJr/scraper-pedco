@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -10,13 +11,10 @@ import (
 	"scraper-pedco/internal/core/ports"
 )
 
-// MessageSender abstrae el envío de mensajes (Telegram, WhatsApp, etc).
 type MessageSender interface {
 	Send(chatID int64, message string) error
 }
 
-// Notifier orquesta scraping + notificación.
-// No conoce SQLite, Telebot ni Colly directamente.
 type Notifier struct {
 	users          ports.UserRepository
 	makeScraper    ports.ScraperFactory
@@ -36,7 +34,6 @@ func NewNotifier(users ports.UserRepository, makeScraper ports.ScraperFactory, s
 	}
 }
 
-// NotifyAll recorre todos los usuarios y manda alerta si hay eventos.
 func (n *Notifier) NotifyAll() {
 	log.Println("🤖 Iniciando ronda de revisión automática...")
 	users, err := n.users.GetAllUsers()
@@ -46,7 +43,7 @@ func (n *Notifier) NotifyAll() {
 	}
 
 	for _, u := range users {
-		events, err := n.fetchFor(u.User, u.Pass)
+		events, err := n.fetchFor(u.ChatID, u.User, u.Pass, u.Session)
 		if err != nil {
 			log.Printf("⚠️ ChatID %d: %v", u.ChatID, err)
 			time.Sleep(n.delayBetween)
@@ -66,15 +63,16 @@ func (n *Notifier) NotifyAll() {
 	log.Println("🏁 Ronda finalizada.")
 }
 
-// NotifyOne ejecuta scraping bajo demanda (comando /tps).
-// Retorna el mensaje listo para enviar, o cadena vacía si no hay eventos.
 func (n *Notifier) NotifyOne(chatID int64) (string, error) {
 	user, pass, err := n.users.GetUser(chatID)
 	if err != nil || user == "" {
 		return "", fmt.Errorf("sin credenciales: %w", err)
 	}
 
-	events, err := n.fetchFor(user, pass)
+	// /tps no tiene la sesión cargada en memoria; intenta refrescarla via login completo.
+	// Si quisiéramos reusar sesión también acá, GetUser tendría que devolverla.
+	// Por simplicidad la pedimos junto al fetchFor flow estándar (cacheable abajo).
+	events, err := n.fetchFor(chatID, user, pass, "")
 	if err != nil {
 		return "", err
 	}
@@ -84,11 +82,39 @@ func (n *Notifier) NotifyOne(chatID int64) (string, error) {
 	return n.formatEvents(events, false), nil
 }
 
-func (n *Notifier) fetchFor(user, pass string) ([]domain.Event, error) {
+// fetchFor implementa la estrategia cookie-first:
+//  1. Si hay session blob, intentar usarlo directo (sin login).
+//  2. Si Moodle devolvió ErrSessionExpired, limpiar caché y caer a login.
+//  3. Login + scrape + guardar nueva sesión.
+func (n *Notifier) fetchFor(chatID int64, user, pass, session string) ([]domain.Event, error) {
+	if session != "" {
+		scraper := n.makeScraper()
+		if err := scraper.LoadSession(session); err == nil {
+			events, err := scraper.FetchEvents()
+			if err == nil {
+				log.Printf("♻️  ChatID %d: sesión cached válida (sin login)", chatID)
+				return events, nil
+			}
+			if !errors.Is(err, ports.ErrSessionExpired) {
+				return nil, fmt.Errorf("fetch con sesión cached falló: %w", err)
+			}
+			log.Printf("🔄 ChatID %d: sesión expirada, reloguear", chatID)
+			_ = n.users.ClearSession(chatID)
+		}
+	}
+
 	scraper := n.makeScraper()
 	if err := scraper.Login(user, pass); err != nil {
 		return nil, fmt.Errorf("login falló: %w", err)
 	}
+
+	// Guardar nueva sesión antes del scrape (si falla el save, no es fatal).
+	if blob, err := scraper.SessionBlob(); err == nil {
+		if saveErr := n.users.SaveSession(chatID, blob); saveErr != nil {
+			log.Printf("⚠️ ChatID %d: no se pudo persistir sesión: %v", chatID, saveErr)
+		}
+	}
+
 	events, err := scraper.FetchEvents()
 	if err != nil {
 		return nil, fmt.Errorf("fetch eventos falló: %w", err)
