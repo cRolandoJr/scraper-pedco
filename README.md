@@ -30,4 +30,4 @@ Un microservicio de backend desarrollado en **Go** diseñado para automatizar el
 Este proyecto es **Open Source**. Esto significa que puedes revisar el código fuente para verificar que tus credenciales se manejan localmente y solo se envían a los servidores oficiales de la universidad. Nunca se almacenan ni se comparten con terceros.
 
 ---
- **Desarrollado por [Rolando Cobis](https://www.linkedin.com/in/tu-perfil)** *Estudiante de Desarrollo Web y Administración de Sistemas - UNComa*
+ **Desarrollado por [Rolando Cobis](https://www.linkedin.com/in/rolando-cobis-jr/)** *Estudiante de Desarrollo Web y Administración de Sistemas - UNComa*
