@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -10,103 +11,132 @@ import (
 	"scraper-pedco/internal/core/ports"
 )
 
-// MessageSender abstrae el envío de mensajes (Telegram, WhatsApp, etc).
 type MessageSender interface {
 	Send(chatID int64, message string) error
 }
 
-// Notifier orquesta scraping + notificación.
-// No conoce SQLite, Telebot ni Colly directamente.
 type Notifier struct {
-	users          ports.UserRepository
+	userRepository ports.UserRepository
 	makeScraper    ports.ScraperFactory
-	sender         MessageSender
+	messageSender  MessageSender
 	delayBetween   time.Duration
 	signatureBlock string
 }
 
-func NewNotifier(users ports.UserRepository, makeScraper ports.ScraperFactory, sender MessageSender) *Notifier {
+func NewNotifier(userRepository ports.UserRepository, makeScraper ports.ScraperFactory, messageSender MessageSender) *Notifier {
 	return &Notifier{
-		users:        users,
-		makeScraper:  makeScraper,
-		sender:       sender,
-		delayBetween: 3 * time.Second,
+		userRepository: userRepository,
+		makeScraper:    makeScraper,
+		messageSender:  messageSender,
+		delayBetween:   3 * time.Second,
 		signatureBlock: "\n---\n👨‍💻 *PedcoBot* | " +
 			"[Rolando Cobis](https://linkedin.com/in/rolando-cobis-jr)",
 	}
 }
 
-// NotifyAll recorre todos los usuarios y manda alerta si hay eventos.
-func (n *Notifier) NotifyAll() {
+func (notifier *Notifier) NotifyAll() {
 	log.Println("🤖 Iniciando ronda de revisión automática...")
-	users, err := n.users.GetAllUsers()
+	allUsers, err := notifier.userRepository.GetAllUsers()
 	if err != nil {
 		log.Println("❌ Error obteniendo usuarios:", err)
 		return
 	}
 
-	for _, u := range users {
-		events, err := n.fetchFor(u.User, u.Pass)
+	for _, userCredentials := range allUsers {
+		events, err := notifier.fetchEventsFor(
+			userCredentials.ChatID,
+			userCredentials.User,
+			userCredentials.Pass,
+			userCredentials.Session,
+		)
 		if err != nil {
-			log.Printf("⚠️ ChatID %d: %v", u.ChatID, err)
-			time.Sleep(n.delayBetween)
+			log.Printf("⚠️ ChatID %d: %v", userCredentials.ChatID, err)
+			time.Sleep(notifier.delayBetween)
 			continue
 		}
 
 		if len(events) > 0 {
-			msg := n.formatEvents(events, true)
-			if err := n.sender.Send(u.ChatID, msg); err != nil {
-				log.Printf("⚠️ Falló envío ChatID %d: %v", u.ChatID, err)
+			messageBody := notifier.formatEvents(events, true)
+			if err := notifier.messageSender.Send(userCredentials.ChatID, messageBody); err != nil {
+				log.Printf("⚠️ Falló envío ChatID %d: %v", userCredentials.ChatID, err)
 			} else {
-				log.Printf("✅ Notificación enviada a ChatID %d", u.ChatID)
+				log.Printf("✅ Notificación enviada a ChatID %d", userCredentials.ChatID)
 			}
 		}
-		time.Sleep(n.delayBetween)
+		time.Sleep(notifier.delayBetween)
 	}
 	log.Println("🏁 Ronda finalizada.")
 }
 
-// NotifyOne ejecuta scraping bajo demanda (comando /tps).
-// Retorna el mensaje listo para enviar, o cadena vacía si no hay eventos.
-func (n *Notifier) NotifyOne(chatID int64) (string, error) {
-	user, pass, err := n.users.GetUser(chatID)
-	if err != nil || user == "" {
+func (notifier *Notifier) NotifyOne(chatID int64) (string, error) {
+	username, password, err := notifier.userRepository.GetUser(chatID)
+	if err != nil || username == "" {
 		return "", fmt.Errorf("sin credenciales: %w", err)
 	}
 
-	events, err := n.fetchFor(user, pass)
+	// /tps no tiene la sesión cargada en memoria; intenta refrescarla via login completo.
+	// Si quisiéramos reusar sesión también acá, GetUser tendría que devolverla.
+	events, err := notifier.fetchEventsFor(chatID, username, password, "")
 	if err != nil {
 		return "", err
 	}
 	if len(events) == 0 {
 		return "", nil
 	}
-	return n.formatEvents(events, false), nil
+	return notifier.formatEvents(events, false), nil
 }
 
-func (n *Notifier) fetchFor(user, pass string) ([]domain.Event, error) {
-	scraper := n.makeScraper()
-	if err := scraper.Login(user, pass); err != nil {
+// fetchEventsFor implementa la estrategia cookie-first:
+//  1. Si hay session blob, intentar usarlo directo (sin login).
+//  2. Si Moodle devolvió ErrSessionExpired, limpiar caché y caer a login.
+//  3. Login + scrape + guardar nueva sesión.
+func (notifier *Notifier) fetchEventsFor(chatID int64, username, password, cachedSession string) ([]domain.Event, error) {
+	if cachedSession != "" {
+		cachedScraper := notifier.makeScraper()
+		if err := cachedScraper.LoadSession(cachedSession); err == nil {
+			events, fetchErr := cachedScraper.FetchEvents()
+			if fetchErr == nil {
+				log.Printf("♻️  ChatID %d: sesión cached válida (sin login)", chatID)
+				return events, nil
+			}
+			if !errors.Is(fetchErr, ports.ErrSessionExpired) {
+				return nil, fmt.Errorf("fetch con sesión cached falló: %w", fetchErr)
+			}
+			log.Printf("🔄 ChatID %d: sesión expirada, reloguear", chatID)
+			_ = notifier.userRepository.ClearSession(chatID)
+		}
+	}
+
+	freshScraper := notifier.makeScraper()
+	if err := freshScraper.Login(username, password); err != nil {
 		return nil, fmt.Errorf("login falló: %w", err)
 	}
-	events, err := scraper.FetchEvents()
+
+	// Guardar nueva sesión antes del scrape (si falla el save, no es fatal).
+	if newSessionBlob, err := freshScraper.SessionBlob(); err == nil {
+		if saveErr := notifier.userRepository.SaveSession(chatID, newSessionBlob); saveErr != nil {
+			log.Printf("⚠️ ChatID %d: no se pudo persistir sesión: %v", chatID, saveErr)
+		}
+	}
+
+	events, err := freshScraper.FetchEvents()
 	if err != nil {
 		return nil, fmt.Errorf("fetch eventos falló: %w", err)
 	}
 	return events, nil
 }
 
-func (n *Notifier) formatEvents(events []domain.Event, automatic bool) string {
-	var b strings.Builder
-	if automatic {
-		b.WriteString("⏰ *Alerta Automática de Entregas:*\n\n")
+func (notifier *Notifier) formatEvents(events []domain.Event, automaticRound bool) string {
+	var messageBuilder strings.Builder
+	if automaticRound {
+		messageBuilder.WriteString("⏰ *Alerta Automática de Entregas:*\n\n")
 	} else {
-		b.WriteString("📚 *Tus Próximos Eventos en Pedco:*\n\n")
+		messageBuilder.WriteString("📚 *Tus Próximos Eventos en Pedco:*\n\n")
 	}
-	for _, ev := range events {
-		fmt.Fprintf(&b, "%s *%s*\n📘 Materia: %s\n⏰ Vence: %s\n🔗 [Ir a Pedco](%s)\n\n",
-			ev.Type, ev.Title, ev.Course, ev.DueDate, ev.Link)
+	for _, event := range events {
+		fmt.Fprintf(&messageBuilder, "%s *%s*\n📘 Materia: %s\n⏰ Vence: %s\n🔗 [Ir a Pedco](%s)\n\n",
+			event.Type, event.Title, event.Course, event.DueDate, event.Link)
 	}
-	b.WriteString(n.signatureBlock)
-	return b.String()
+	messageBuilder.WriteString(notifier.signatureBlock)
+	return messageBuilder.String()
 }

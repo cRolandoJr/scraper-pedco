@@ -2,23 +2,35 @@ package storage
 
 import "scraper-pedco/internal/core/ports"
 
-// Repository adapta las funciones globales del paquete a la interfaz UserRepository.
 type Repository struct{}
 
 func NewRepository() *Repository { return &Repository{} }
 
-func (r *Repository) GetUser(chatID int64) (string, string, error) {
+func (repository *Repository) GetUser(chatID int64) (string, string, error) {
 	return GetUser(chatID)
 }
 
-func (r *Repository) GetAllUsers() ([]ports.UserCredentials, error) {
-	rows, err := GetAllUsers()
+func (repository *Repository) GetAllUsers() ([]ports.UserCredentials, error) {
+	allUsers, err := GetAllUsers()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]ports.UserCredentials, 0, len(rows))
-	for _, u := range rows {
-		out = append(out, ports.UserCredentials{ChatID: u.ChatID, User: u.User, Pass: u.Pass})
+	credentials := make([]ports.UserCredentials, 0, len(allUsers))
+	for _, userData := range allUsers {
+		credentials = append(credentials, ports.UserCredentials{
+			ChatID:  userData.ChatID,
+			User:    userData.User,
+			Pass:    userData.Pass,
+			Session: userData.Session,
+		})
 	}
-	return out, nil
+	return credentials, nil
+}
+
+func (repository *Repository) SaveSession(chatID int64, sessionBlob string) error {
+	return SaveSession(chatID, sessionBlob)
+}
+
+func (repository *Repository) ClearSession(chatID int64) error {
+	return ClearSession(chatID)
 }

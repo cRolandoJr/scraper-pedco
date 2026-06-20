@@ -1,51 +1,57 @@
 {
-    description = "Entorno de desarrollo para scraper de Pedco en Go";
+  description = "scraper-pedco (Go + sqlite3 via cgo) - devShell + package for NixOS";
 
-    inputs = {
-        nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    };
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
 
-    outputs = { self, nixpkgs }:
-    let
-        system = "x86_64-linux";
+  outputs = { self, nixpkgs, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
         pkgs = nixpkgs.legacyPackages.${system};
-    in
-    {
-        devShells.${system}.default = pkgs.mkShell {
-            buildInputs = with pkgs; [
-                # Toolchain Go
-                go
-                gopls
-                gotools
-                go-outline
-                delve
-                golangci-lint
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            go gopls gotools go-outline delve golangci-lint
+            gcc pkg-config
+            sqlite
+            openssl
+          ];
 
-                # CGO (mattn/go-sqlite3 requiere compilador C)
-                gcc
-                pkg-config
-
-                # Utilidades runtime
-                sqlite       # CLI para inspeccionar pedcobot.db
-                openssl      # generar SECRET_KEY (openssl rand -base64 32)
-            ];
-
-            shellHook = ''
-                export CGO_ENABLED=1
-                echo "================================================="
-                echo "Entorno Scraper Pedco listo."
-                echo "Go: $(go version | awk '{print $3}')"
-                echo "GCC: $(gcc --version | head -1 | awk '{print $NF}')"
-                echo "SQLite: $(sqlite3 --version | awk '{print $1}')"
-                echo "-------------------------------------------------"
-                echo "Comandos útiles:"
-                echo "  go run ./cmd/scraper       - correr bot dev"
-                echo "  go build -o pedco-bot ./cmd/scraper"
-                echo "  golangci-lint run          - lintear"
-                echo "  sqlite3 pedcobot.db        - inspeccionar DB"
-                echo "  openssl rand -base64 32    - generar SECRET_KEY"
-                echo "================================================="
-            '';
+          shellHook = ''
+            export CGO_ENABLED=1
+            echo "scraper-pedco devShell listo (CGO_ENABLED=1)"
+          '';
         };
-    };
+
+        packages.pedco-bot = pkgs.buildGoModule {
+          pname = "pedco-bot";
+          version = "0.1.0";
+          src = ./.;
+
+          subPackages = [ "cmd/scraper" ];
+
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [ sqlite ];
+
+          env = { CGO_ENABLED = "1"; };
+
+          vendorHash = "sha256-ZuuuMAsj+dM/Vu4dTz6+v9AXcgA7XVAwmaSAjz0qsIQ=";
+
+          postInstall = ''
+            if [ -f "$out/bin/scraper" ]; then
+              mv "$out/bin/scraper" "$out/bin/pedco-bot"
+            fi
+          '';
+        };
+
+        packages.default = self.packages.${system}.pedco-bot;
+
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.pedco-bot}/bin/pedco-bot";
+        };
+      });
 }

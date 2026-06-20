@@ -20,3 +20,8 @@ debug_*.html
 *.test
 *.out
 vendor/
+
+# Nix / direnv
+.direnv/
+result
+result-*

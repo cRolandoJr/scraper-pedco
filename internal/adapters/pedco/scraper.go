@@ -1,12 +1,17 @@
 package pedco
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"scraper-pedco/internal/core/domain"
+	"scraper-pedco/internal/core/ports"
 
 	"github.com/gocolly/colly/v2"
 )
@@ -17,32 +22,36 @@ const (
 	userAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
 )
 
+// ErrSessionExpired re-exporta el sentinel del puerto para que callers que ya
+// importan este adapter no necesiten conocer la capa ports.
+var ErrSessionExpired = ports.ErrSessionExpired
+
 type PedcoScraper struct {
 	collector *colly.Collector
 }
 
 func NewPedcoScraper() *PedcoScraper {
-	c := colly.NewCollector(colly.UserAgent(userAgent))
-	c.SetRequestTimeout(requestTimeout)
-	return &PedcoScraper{collector: c}
+	collector := colly.NewCollector(colly.UserAgent(userAgent))
+	collector.SetRequestTimeout(requestTimeout)
+	return &PedcoScraper{collector: collector}
 }
 
-func (s *PedcoScraper) Login(username, password string) error {
+func (scraper *PedcoScraper) Login(username, password string) error {
 	loginURL := baseURL + "/login/index.php"
 
 	var loginToken string
-	s.collector.OnHTML("input[name='logintoken']", func(e *colly.HTMLElement) {
-		loginToken = e.Attr("value")
+	scraper.collector.OnHTML("input[name='logintoken']", func(htmlElement *colly.HTMLElement) {
+		loginToken = htmlElement.Attr("value")
 	})
 
-	if err := s.collector.Visit(loginURL); err != nil {
+	if err := scraper.collector.Visit(loginURL); err != nil {
 		return fmt.Errorf("fallo al visitar página de login: %w", err)
 	}
 	if loginToken == "" {
 		return fmt.Errorf("no se pudo encontrar logintoken (¿cambió layout de Pedco?)")
 	}
 
-	err := s.collector.Post(loginURL, map[string]string{
+	err := scraper.collector.Post(loginURL, map[string]string{
 		"username":   username,
 		"password":   password,
 		"logintoken": loginToken,
@@ -54,59 +63,112 @@ func (s *PedcoScraper) Login(username, password string) error {
 	return nil
 }
 
-func (s *PedcoScraper) FetchEvents() ([]domain.Event, error) {
+// SessionBlob serializa las cookies actuales del scraper para persistir.
+func (scraper *PedcoScraper) SessionBlob() (string, error) {
+	cookies := scraper.collector.Cookies(baseURL)
+	if len(cookies) == 0 {
+		return "", errors.New("scraper sin cookies para serializar")
+	}
+	serialized, err := json.Marshal(cookies)
+	if err != nil {
+		return "", err
+	}
+	return string(serialized), nil
+}
+
+// LoadSession inyecta cookies previas. Llamar antes de FetchEvents para evitar login.
+func (scraper *PedcoScraper) LoadSession(sessionBlob string) error {
+	if sessionBlob == "" {
+		return errors.New("sesión vacía")
+	}
+	var cookies []*http.Cookie
+	if err := json.Unmarshal([]byte(sessionBlob), &cookies); err != nil {
+		return fmt.Errorf("blob de sesión corrupto: %w", err)
+	}
+	parsedBaseURL, _ := url.Parse(baseURL)
+	return scraper.collector.SetCookies(parsedBaseURL.String(), cookies)
+}
+
+func (scraper *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 	var events []domain.Event
+	var redirectedToLogin bool
 	calendarURL := baseURL + "/calendar/view.php?view=upcoming"
 
-	// Clone hereda cookies de sesión pero aísla el callback OnHTML
-	// para no acumular handlers entre invocaciones repetidas.
-	pageCollector := s.collector.Clone()
-	pageCollector.OnHTML("div[data-type='event']", func(e *colly.HTMLElement) {
-		ev, ok := parseEvent(e)
-		if !ok {
-			return
+	pageCollector := scraper.collector.Clone()
+
+	// Sesión expirada → Moodle redirige el calendario a /login (y el login
+	// re-redirige a sí mismo, lo que hacía cortar a colly con "already visited"
+	// y ocultaba la detección). Frenamos en el primer redirect a /login.
+	pageCollector.SetRedirectHandler(func(req *http.Request, via []*http.Request) error {
+		if strings.Contains(req.URL.Path, "/login/") {
+			redirectedToLogin = true
+			return http.ErrUseLastResponse
 		}
-		events = append(events, ev)
-		log.Printf("✅ [%s] %s", ev.Type, ev.Title)
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		return nil
 	})
 
-	if err := pageCollector.Visit(calendarURL); err != nil {
+	// Fallback: si el calendario devolviera la página de login sin redirect.
+	pageCollector.OnResponse(func(response *colly.Response) {
+		if strings.Contains(response.Request.URL.Path, "/login/") {
+			redirectedToLogin = true
+		}
+	})
+
+	pageCollector.OnHTML("div[data-type='event']", func(htmlElement *colly.HTMLElement) {
+		event, isInteresting := parseEvent(htmlElement)
+		if !isInteresting {
+			return
+		}
+		events = append(events, event)
+		log.Printf("✅ [%s] %s", event.Type, event.Title)
+	})
+
+	err := pageCollector.Visit(calendarURL)
+	// El redirect a /login (sesión muerta) hace que Visit devuelva error, así que
+	// chequeamos el flag ANTES del error para no enmascarar ErrSessionExpired.
+	if redirectedToLogin {
+		return nil, ports.ErrSessionExpired
+	}
+	if err != nil {
 		return nil, fmt.Errorf("error visitando calendario: %w", err)
 	}
 	return events, nil
 }
 
-func parseEvent(e *colly.HTMLElement) (domain.Event, bool) {
-	title := e.ChildText("h3.name")
-	titleLower := strings.ToLower(title)
-	component := e.Attr("data-event-component")
+func parseEvent(htmlElement *colly.HTMLElement) (domain.Event, bool) {
+	title := htmlElement.ChildText("h3.name")
+	titleLowercase := strings.ToLower(title)
+	moodleComponent := htmlElement.Attr("data-event-component")
 
-	esTarea := component == "mod_assign"
-	esCuestionario := component == "mod_quiz"
-	esExamen := strings.Contains(titleLower, "parcial") ||
-		strings.Contains(titleLower, "examen") ||
-		strings.Contains(titleLower, "recuperatorio")
+	isAssignment := moodleComponent == "mod_assign"
+	isQuiz := moodleComponent == "mod_quiz"
+	isExam := strings.Contains(titleLowercase, "parcial") ||
+		strings.Contains(titleLowercase, "examen") ||
+		strings.Contains(titleLowercase, "recuperatorio")
 
-	if !esTarea && !esCuestionario && !esExamen {
+	if !isAssignment && !isQuiz && !isExam {
 		return domain.Event{}, false
 	}
 
-	tipo := "📌 Evento"
+	eventType := "📌 Evento"
 	switch {
-	case esTarea:
-		tipo = "📝 Tarea"
-	case esCuestionario || esExamen:
-		tipo = "🔥 EXAMEN / PARCIAL"
+	case isAssignment:
+		eventType = "📝 Tarea"
+	case isQuiz || isExam:
+		eventType = "🔥 EXAMEN / PARCIAL"
 	}
 
-	fechaCruda := e.DOM.Find("i.fa-clock-o").Closest(".row").Find(".col-11").Text()
+	rawDueDate := htmlElement.DOM.Find("i.fa-clock-o").Closest(".row").Find(".col-11").Text()
 
 	return domain.Event{
-		ID:      e.Attr("data-event-id"),
+		ID:      htmlElement.Attr("data-event-id"),
 		Title:   title,
-		Type:    tipo,
-		Course:  e.ChildText("div.row a[href*='course/view.php']"),
-		DueDate: strings.TrimSpace(fechaCruda),
-		Link:    e.ChildAttr("div.card-footer a", "href"),
+		Type:    eventType,
+		Course:  htmlElement.ChildText("div.row a[href*='course/view.php']"),
+		DueDate: strings.TrimSpace(rawDueDate),
+		Link:    htmlElement.ChildAttr("div.card-footer a", "href"),
 	}, true
 }
