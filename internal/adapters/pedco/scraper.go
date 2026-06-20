@@ -96,7 +96,21 @@ func (scraper *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 
 	pageCollector := scraper.collector.Clone()
 
-	// Si Moodle redirige a /login, la sesión está muerta.
+	// Sesión expirada → Moodle redirige el calendario a /login (y el login
+	// re-redirige a sí mismo, lo que hacía cortar a colly con "already visited"
+	// y ocultaba la detección). Frenamos en el primer redirect a /login.
+	pageCollector.SetRedirectHandler(func(req *http.Request, via []*http.Request) error {
+		if strings.Contains(req.URL.Path, "/login/") {
+			redirectedToLogin = true
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	})
+
+	// Fallback: si el calendario devolviera la página de login sin redirect.
 	pageCollector.OnResponse(func(response *colly.Response) {
 		if strings.Contains(response.Request.URL.Path, "/login/") {
 			redirectedToLogin = true
@@ -112,11 +126,14 @@ func (scraper *PedcoScraper) FetchEvents() ([]domain.Event, error) {
 		log.Printf("✅ [%s] %s", event.Type, event.Title)
 	})
 
-	if err := pageCollector.Visit(calendarURL); err != nil {
-		return nil, fmt.Errorf("error visitando calendario: %w", err)
-	}
+	err := pageCollector.Visit(calendarURL)
+	// El redirect a /login (sesión muerta) hace que Visit devuelva error, así que
+	// chequeamos el flag ANTES del error para no enmascarar ErrSessionExpired.
 	if redirectedToLogin {
 		return nil, ports.ErrSessionExpired
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error visitando calendario: %w", err)
 	}
 	return events, nil
 }
