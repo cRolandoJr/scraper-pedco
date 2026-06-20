@@ -2,12 +2,14 @@ package main
 
 import (
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/robfig/cron/v3"
 	tele "gopkg.in/telebot.v3"
 
 	"scraper-pedco/internal/adapters/pedco"
@@ -81,6 +83,71 @@ func (sender *telegramSender) Send(chatID int64, message string) error {
 	return err
 }
 
+// Healthcheck: cada healthcheckInterval llamamos getMe contra la API de
+// Telegram para verificar que el long-poll no quedó zombi. Tras
+// healthcheckMaxFailures consecutivos, os.Exit(1) y systemd reinicia.
+const (
+	healthcheckInterval    = 2 * time.Minute
+	healthcheckMaxFailures = 3
+)
+
+// tokenPattern matchea el token de Telegram embebido en URLs (errores de la
+// lib telebot exponen la URL completa con el token); lo enmascaramos antes
+// de loguear para no leakearlo en journalctl.
+var tokenPattern = regexp.MustCompile(`bot\d+:[A-Za-z0-9_-]+`)
+
+func sanitize(err error) string {
+	if err == nil {
+		return ""
+	}
+	return tokenPattern.ReplaceAllString(err.Error(), "bot***:***")
+}
+
+// buildHTTPClient retorna un http.Client con TCP keepalive corto y timeouts
+// explícitos. Sin esto, telebot usa http.DefaultClient (sin protecciones)
+// y el long-poll queda esperando indefinidamente cuando la conexión TCP
+// muere silenciosamente (suspend/resume, cambio de wifi, NAT rebind).
+// Con KeepAlive=30s, Go detecta el socket muerto en ~30s y retry-ea.
+func buildHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 35 * time.Second, // long-poll Telegram = 10s; margen 25s.
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+}
+
+// startHealthcheck arranca una goroutine que invoca getMe periódicamente.
+// Si falla healthcheckMaxFailures veces seguidas, log.Fatalf termina el
+// proceso y systemd lo levanta (Restart=always en el unit file).
+func startHealthcheck(bot *tele.Bot) {
+	go func() {
+		ticker := time.NewTicker(healthcheckInterval)
+		defer ticker.Stop()
+		consecutiveFailures := 0
+		for range ticker.C {
+			if _, err := bot.Raw("getMe", nil); err != nil {
+				consecutiveFailures++
+				log.Printf("⚠️  Healthcheck falló (%d/%d): %s", consecutiveFailures, healthcheckMaxFailures, sanitize(err))
+				if consecutiveFailures >= healthcheckMaxFailures {
+					log.Fatalf("❌ %d healthchecks consecutivos fallidos — reiniciando service.", healthcheckMaxFailures)
+				}
+				continue
+			}
+			if consecutiveFailures > 0 {
+				log.Printf("✅ Healthcheck recuperado tras %d fallos.", consecutiveFailures)
+			}
+			consecutiveFailures = 0
+		}
+	}()
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Aviso: No se encontró archivo .env local")
@@ -96,9 +163,10 @@ func main() {
 	bot, err := tele.NewBot(tele.Settings{
 		Token:  telegramToken,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
+		Client: buildHTTPClient(),
 	})
 	if err != nil {
-		log.Fatal("❌ Error al iniciar Telebot:", err)
+		log.Fatalf("❌ Error al iniciar Telebot: %s", sanitize(err))
 	}
 
 	// Wiring dependencias (composición sobre herencia).
@@ -107,20 +175,20 @@ func main() {
 	messageSender := &telegramSender{bot: bot}
 	notifier := service.NewNotifier(userRepository, scraperFactory, messageSender)
 
+	// Modo oneshot: lo dispara el systemd timer (Persistent=true). Manda una
+	// ronda de avisos y sale; no abre long-poll ni handlers.
+	if len(os.Args) > 1 && os.Args[1] == "notify" {
+		log.Println("📨 Modo notify: ronda única y salida.")
+		notifier.NotifyAll()
+		return
+	}
+
+	// Daemon: handlers + healthcheck + long-poll. El scheduling de los avisos
+	// 8/20h lo maneja un systemd timer externo (pedco-bot notify), no un cron
+	// interno — así el catch-up tras suspend/apagado lo da systemd.
 	flow := newLoginFlow()
-
-	argentinaLocation, err := time.LoadLocation("America/Argentina/Buenos_Aires")
-	if err != nil {
-		log.Fatal("❌ Error cargando zona horaria:", err)
-	}
-	scheduler := cron.New(cron.WithLocation(argentinaLocation))
-	if _, err := scheduler.AddFunc("0 8,20 * * *", notifier.NotifyAll); err != nil {
-		log.Fatal("❌ Cron expression inválida:", err)
-	}
-	scheduler.Start()
-	log.Println("⏱️  Cron activado (8:00 AM y 8:00 PM - Argentina)")
-
 	registerHandlers(bot, notifier, flow)
+	startHealthcheck(bot)
 
 	log.Println("🚀 Bot escuchando a Telegram...")
 	bot.Start()
@@ -186,8 +254,8 @@ func markdownOpts() *tele.SendOptions {
 func welcomeMessage() string {
 	return "🎓 *¡Hola! Soy el Bot de Pedco UNComa.*\n\n" +
 		"Puedo revisar la plataforma por ti y avisarte de tus entregas.\n\n" +
-		"👉 Usa /login para vincular tu cuenta.\n" +
-		"👉 Usa /tps para revisar tus entregas pendientes.\n\n" +
+		"👉 /login - vincular tu cuenta.\n" +
+		"👉 /tps - revisar entregas pendientes.\n\n" +
 		"---\n" +
 		"👨‍💻 *Desarrollado por [Rolando Cobis](https://linkedin.com/in/rolando-cobis-jr)*"
 }
