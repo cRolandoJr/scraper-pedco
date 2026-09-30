@@ -1,7 +1,17 @@
-# SPEC v4 — Novedades: avisos del foro, notas nuevas y material nuevo
+# SPEC v5 — Novedades: avisos del foro, notas nuevas y material nuevo
 
 Rama `feat/novedades` desde `feat/api-moodle`, una vez que esa rama esté cerrada (spec
 alertas v4). Usa su adaptador `internal/adapters/moodle`. Fecha 2026-09-29.
+
+## Cambios v4 → v5 (PO, 2026-09-30, al ver el E2E de temas)
+
+Los avisos del foro muestran la fecha en que se publicaron. El caso que lo motivó: "Inicio de
+clases mañana miércoles 11" no se entiende sin saber cuándo se escribió. Sale de `created`,
+que ya estaba medido en la tabla y es la publicación, no una edición. Notas y material siguen
+SIN fecha:
+- En notas, `gradedategraded` cambia con cualquier escritura de la fila (medido por el gate de
+  v1), así que mostraría una fecha falsa.
+- En material, `timecreated` es la copia del aula (feb-2026).
 
 ## Cambios v3 → v4 (verificador del 2026-09-30: PASS, con P2 que se corrigen)
 
@@ -171,7 +181,9 @@ Por cada curso:
 
 Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
 
-- **A:** `📣 Aviso en <materia>` + título + `— <autor>` + los primeros 400 caracteres del
+- **A:** `📣 Aviso en <materia>` + título + `— <autor>` + `🗓 Publicado <fecha>` (de
+  `created`, hora de Argentina, con el mismo formato que las alertas: `mar 10/03 14:20`;
+  "Hoy HH:MM" o "Ayer HH:MM" cuando corresponde) + los primeros 400 caracteres del
   texto sin HTML + `🔗 Ver aviso` → `/mod/forum/discuss.php?d=<discussion>`.
   - Los 400 son runas del texto plano, y el corte se hace ANTES de escapar, con `…` si
     se cortó.
@@ -192,7 +204,8 @@ Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
   aparece después SÍ avisa.
 - **N3** Un curso que falla en la pasada 1 y responde en la 2 → en la 2 hace su base SIN
   avisar. Los demás cursos avisan normalmente en la 2.
-- **N4** Aviso nuevo en un foro `news` → mensaje A. Aviso nuevo en un foro `general` →
+- **N4** Aviso nuevo en un foro `news` → mensaje A, con `🗓 Publicado` según `created` en hora
+  de Argentina (fixture con un `created` real; un caso de "Hoy" y otro con fecha). Aviso nuevo en un foro `general` →
   nada. Un foro con 10 avisos nuevos → llegan los 10 (el fake no pagina y el adaptador no
   manda `perpage`).
 - **N5** Nota nueva → mensaje B con la nota sin HTML (fixture con el `gradeformatted` real).
