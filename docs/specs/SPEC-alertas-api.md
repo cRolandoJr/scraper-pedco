@@ -1,6 +1,16 @@
-# SPEC v2 — Alertas con estado, vía la API de Moodle
+# SPEC v3 — Alertas con estado, vía la API de Moodle
 
 Rama `feat/api-moodle` desde `main` @ `bd2c07b`. Fecha 2026-09-29.
+
+## Cambios v2 → v3 (pedido del PO, 2026-09-29)
+
+El PO quiere que, cuando el token vence y el bot no lo puede renovar solo, se lo pida por
+Telegram. Hoy eso no pasa: si el re-login falla en la ronda automática el error solo va al
+log (`notifier.go:52`) y el usuario deja de recibir avisos sin enterarse. Además `/tps`
+responde "No tienes credenciales válidas" ante CUALQUIER error (`main.go:217`), incluso con
+PEDCO caído, y `/login` guarda la contraseña sin probarla. Se agregan la sección
+"Credenciales rechazadas" y los criterios C17–C20; sale de "Fuera de alcance" la validación
+en `/login`, porque este pedido dispara su gatillo.
 
 ## Cambios v1 → v2 (lo que tumbó el gate del 2026-09-29)
 
@@ -139,6 +149,38 @@ re-entregar, y un "hecho" falso es peor (fail-closed hacia la duda, no hacia una
 **`Login`:** POST a `/login/token.php` con `username`, `password`, `service=moodle_mobile_app`.
 La respuesta trae `token` o `error`; `error` → error de login.
 
+### Credenciales rechazadas (v3)
+
+Un error nuevo en `ports`: `ErrBadCredentials`. `Login` lo devuelve SOLO cuando
+`token.php` responde con `errorcode` `invalidlogin`. Cualquier otro error (timeout, HTTP
+distinto de 200, cuerpo no JSON, otro `errorcode`) sigue siendo un error común.
+
+La separación es lo que decide el diseño. El 2026-09-29 PEDCO estuvo caído durante toda
+la sesión (timeout en `token.php` y en `server.php`, con Google respondiendo). Si "no pude
+entrar" disparara el aviso, esa caída les habría dicho a todos los usuarios que su
+contraseña no funciona.
+
+- **Ronda automática:** si el login da `ErrBadCredentials`, se le manda al usuario:
+  `🔑 PEDCO rechazó tu usuario o contraseña guardados (¿la cambiaste?). Mandá /login para
+  actualizarlos. Hasta entonces no te llegan avisos.` El mensaje se repite en cada ronda
+  (8 y 20 h) mientras siga fallando. No se guarda estado nuevo para deduplicar: dos
+  recordatorios por día hasta que lo arregle es lo que se busca. Los demás errores siguen
+  yendo solo al log.
+- **`/tps`:** `ErrBadCredentials` o usuario sin credenciales → `❌ No tienes credenciales
+  válidas. Usa /login.` Cualquier otro error → `⚠️ No pude consultar PEDCO ahora (puede
+  estar caído). Probá en un rato.`
+- **`/login`, después de recibir la contraseña:** primero se guarda, como hoy, y después
+  se llama a `Login`. Con token → se guarda con `SaveSession` → `🔐 Listo, entré a PEDCO
+  con tu cuenta. Usá /tps para ver tus entregas.` Con `ErrBadCredentials` → `❌ PEDCO
+  rechazó ese usuario o contraseña. Probá /login de nuevo.` Con otro error →
+  `💾 Guardé tus datos, pero PEDCO no responde ahora; los pruebo en la próxima ronda.`
+  Guardar antes de probar es a propósito: si PEDCO está caído, igual quedan los datos.
+
+**No medido:** que PEDCO responda `invalidlogin` ante credenciales malas. Está en el
+código de Moodle 4.1 (`login/token.php`), pero no pude medirlo el 2026-09-29 porque PEDCO
+no respondía. Se mide en el E2E con un usuario inexistente, así no suma un intento fallido
+en la cuenta de nadie. Si el código es otro, se ajusta la constante y se anota acá.
+
 ### Persistencia
 
 La columna `session_blob` pasa a guardar el **token**, cifrado como hoy. Sin migración: la
@@ -224,11 +266,18 @@ tiene esos caracteres (gate, con control positivo); el escape no está medido co
   (fixture en el golden de C11).
 - **C15** Quiz `overdue` → `⏳ Intento sin terminar`; quiz solo `abandoned` → `❔`.
 - **C16** Materia `2026-Administracion de Sistemas` → `Administracion de Sistemas`.
+- **C17** `token.php` responde `{"error":…,"errorcode":"invalidlogin"}` → `Login` devuelve
+  `ErrBadCredentials` (`errors.Is`). Timeout, HTTP 500 u otro `errorcode` → NO es
+  `ErrBadCredentials`.
+- **C18** Ronda automática: un usuario con `ErrBadCredentials` recibe el mensaje 🔑 y la
+  ronda sigue con el siguiente. Un usuario con timeout NO recibe mensaje.
+- **C19** `/tps`: `ErrBadCredentials` → mensaje de `/login`; otro error → mensaje de PEDCO
+  caído.
+- **C20** `/login` con credenciales buenas → token guardado + 🔐; con malas → ❌ y los datos
+  quedan guardados; con PEDCO caído → 💾.
 
 ## Fuera de alcance (con gatillo)
 
-- Validar la contraseña en `/login` pidiendo el token en ese momento. *Gatillo:* un usuario
-  que guarda credenciales malas y no se entera.
 - Avisar notas nuevas. *Gatillo:* que el PO lo pida.
 - Eventos de curso con "parcial"/"examen"/"recuperatorio" en el título: el parser actual los
   toma (`scraper.go:148-152`) y la API de tareas y quizzes no. Hoy no hay ninguno en los
