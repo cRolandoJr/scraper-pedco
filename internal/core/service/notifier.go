@@ -4,11 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"scraper-pedco/internal/core/domain"
 	"scraper-pedco/internal/core/ports"
+)
+
+const (
+	credentialsRejectedMessage = "🔑 PEDCO rechazó tu usuario o contraseña guardados (¿la cambiaste?). Mandá /login para actualizarlos. Hasta entonces no te llegan avisos."
+	noCredentialsMessage       = "❌ No tienes credenciales válidas. Usa /login."
+	pedcoUnavailableMessage    = "⚠️ No pude consultar tus entregas ahora (PEDCO puede estar caído). Probá en un rato."
+	nothingPendingMessage      = "✅ ¡No tienes entregas pendientes! Relájate."
+	saveFailedMessage          = "❌ Hubo un error guardando tus datos."
+	loginOKMessage             = "🔐 Listo, entré a PEDCO con tu cuenta. Usá /tps para ver tus entregas."
+	loginRejectedMessage       = "❌ PEDCO rechazó ese usuario o contraseña. Probá /login de nuevo."
+	loginUnreachableMessage    = "💾 Guardé tus datos, pero PEDCO no responde ahora; los pruebo en la próxima ronda."
 )
 
 type MessageSender interface {
@@ -17,19 +27,23 @@ type MessageSender interface {
 
 type Notifier struct {
 	userRepository ports.UserRepository
-	makeScraper    ports.ScraperFactory
+	source         ports.Source
 	messageSender  MessageSender
+	location       *time.Location
+	now            func() time.Time
 	delayBetween   time.Duration
 	signatureBlock string
 }
 
-func NewNotifier(userRepository ports.UserRepository, makeScraper ports.ScraperFactory, messageSender MessageSender) *Notifier {
+func NewNotifier(userRepository ports.UserRepository, source ports.Source, messageSender MessageSender, location *time.Location) *Notifier {
 	return &Notifier{
 		userRepository: userRepository,
-		makeScraper:    makeScraper,
+		source:         source,
 		messageSender:  messageSender,
+		location:       location,
+		now:            time.Now,
 		delayBetween:   3 * time.Second,
-		signatureBlock: "\n---\n👨‍💻 *PedcoBot* | " +
+		signatureBlock: "---\n👨‍💻 *PedcoBot* | " +
 			"[Rolando Cobis](https://linkedin.com/in/rolando-cobis-jr)",
 	}
 }
@@ -43,100 +57,132 @@ func (notifier *Notifier) NotifyAll() {
 	}
 
 	for _, userCredentials := range allUsers {
-		events, err := notifier.fetchEventsFor(
-			userCredentials.ChatID,
-			userCredentials.User,
-			userCredentials.Pass,
-			userCredentials.Session,
-		)
-		if err != nil {
-			log.Printf("⚠️ ChatID %d: %v", userCredentials.ChatID, err)
-			time.Sleep(notifier.delayBetween)
+		if userCredentials.CredsRejected {
+			log.Printf("⏸️ ChatID %d: credenciales rechazadas, en pausa hasta /login", userCredentials.ChatID)
 			continue
 		}
-
-		if len(events) > 0 {
-			messageBody := notifier.formatEvents(events, true)
-			if err := notifier.messageSender.Send(userCredentials.ChatID, messageBody); err != nil {
-				log.Printf("⚠️ Falló envío ChatID %d: %v", userCredentials.ChatID, err)
-			} else {
-				log.Printf("✅ Notificación enviada a ChatID %d", userCredentials.ChatID)
-			}
-		}
+		notifier.notifyUser(userCredentials)
 		time.Sleep(notifier.delayBetween)
 	}
 	log.Println("🏁 Ronda finalizada.")
 }
 
-func (notifier *Notifier) NotifyOne(chatID int64) (string, error) {
-	username, password, err := notifier.userRepository.GetUser(chatID)
-	if err != nil || username == "" {
-		return "", fmt.Errorf("sin credenciales: %w", err)
+func (notifier *Notifier) notifyUser(userCredentials ports.UserCredentials) {
+	chatID := userCredentials.ChatID
+	items, err := notifier.fetchItemsFor(userCredentials)
+	if errors.Is(err, ports.ErrBadCredentials) {
+		notifier.markRejected(chatID)
+		if sendErr := notifier.messageSender.Send(chatID, credentialsRejectedMessage); sendErr != nil {
+			log.Printf("⚠️ Falló envío del aviso de credenciales a ChatID %d: %v", chatID, sendErr)
+		}
+		return
 	}
-
-	// /tps no tiene la sesión cargada en memoria; intenta refrescarla via login completo.
-	// Si quisiéramos reusar sesión también acá, GetUser tendría que devolverla.
-	events, err := notifier.fetchEventsFor(chatID, username, password, "")
 	if err != nil {
-		return "", err
+		log.Printf("⚠️ ChatID %d: %v", chatID, err)
+		return
 	}
-	if len(events) == 0 {
-		return "", nil
+	if !hasPending(items) {
+		return
 	}
-	return notifier.formatEvents(events, false), nil
+	if err := notifier.messageSender.Send(chatID, notifier.formatItems(items, true)); err != nil {
+		log.Printf("⚠️ Falló envío ChatID %d: %v", chatID, err)
+	} else {
+		log.Printf("✅ Notificación enviada a ChatID %d", chatID)
+	}
 }
 
-// fetchEventsFor implementa la estrategia cookie-first:
-//  1. Si hay session blob, intentar usarlo directo (sin login).
-//  2. Si Moodle devolvió ErrSessionExpired, limpiar caché y caer a login.
-//  3. Login + scrape + guardar nueva sesión.
-func (notifier *Notifier) fetchEventsFor(chatID int64, username, password, cachedSession string) ([]domain.Event, error) {
-	if cachedSession != "" {
-		cachedScraper := notifier.makeScraper()
-		if err := cachedScraper.LoadSession(cachedSession); err == nil {
-			events, fetchErr := cachedScraper.FetchEvents()
-			if fetchErr == nil {
-				log.Printf("♻️  ChatID %d: sesión cached válida (sin login)", chatID)
-				return events, nil
-			}
-			if !errors.Is(fetchErr, ports.ErrSessionExpired) {
-				return nil, fmt.Errorf("fetch con sesión cached falló: %w", fetchErr)
-			}
-			log.Printf("🔄 ChatID %d: sesión expirada, reloguear", chatID)
-			_ = notifier.userRepository.ClearSession(chatID)
+// NotifyOne arma la respuesta de /tps.
+func (notifier *Notifier) NotifyOne(chatID int64) string {
+	userCredentials, err := notifier.userRepository.GetUser(chatID)
+	if err != nil {
+		if !errors.Is(err, ports.ErrNoCredentials) {
+			log.Printf("⚠️ ChatID %d: no pude leer sus credenciales: %v", chatID, err)
 		}
+		return noCredentialsMessage
+	}
+	if userCredentials.CredsRejected {
+		return noCredentialsMessage
+	}
+	items, err := notifier.fetchItemsFor(userCredentials)
+	if errors.Is(err, ports.ErrBadCredentials) {
+		notifier.markRejected(chatID)
+		return noCredentialsMessage
+	}
+	if err != nil {
+		log.Printf("⚠️ ChatID %d (/tps): %v", chatID, err)
+		return pedcoUnavailableMessage
+	}
+	if len(items) == 0 {
+		return nothingPendingMessage
+	}
+	return notifier.formatItems(items, false)
+}
+
+// LinkAccount guarda las credenciales de /login y las prueba contra PEDCO.
+// Guarda antes de probar a propósito: si PEDCO está caído, los datos quedan.
+func (notifier *Notifier) LinkAccount(chatID int64, username, password string) string {
+	if err := notifier.userRepository.SaveUser(chatID, username, password); err != nil {
+		log.Printf("⚠️ ChatID %d: error guardando credenciales: %v", chatID, err)
+		return saveFailedMessage
+	}
+	token, err := notifier.source.Login(username, password)
+	switch {
+	case err == nil:
+		if saveErr := notifier.userRepository.SaveSession(chatID, token); saveErr != nil {
+			log.Printf("⚠️ ChatID %d: no se pudo persistir el token: %v", chatID, saveErr)
+		}
+		return loginOKMessage
+	case errors.Is(err, ports.ErrBadCredentials):
+		notifier.markRejected(chatID)
+		return loginRejectedMessage
+	default:
+		log.Printf("⚠️ ChatID %d (/login): %v", chatID, err)
+		return loginUnreachableMessage
+	}
+}
+
+// fetchItemsFor usa el token guardado; si venció, reloguea UNA vez.
+func (notifier *Notifier) fetchItemsFor(userCredentials ports.UserCredentials) ([]domain.Item, error) {
+	chatID := userCredentials.ChatID
+	now := notifier.now()
+	if userCredentials.Session != "" {
+		items, err := notifier.source.FetchItems(userCredentials.Session, now)
+		if err == nil {
+			return items, nil
+		}
+		if !errors.Is(err, ports.ErrSessionExpired) {
+			return nil, fmt.Errorf("consulta con el token guardado falló: %w", err)
+		}
+		log.Printf("🔄 ChatID %d: token vencido, reloguear", chatID)
+		_ = notifier.userRepository.ClearSession(chatID)
 	}
 
-	freshScraper := notifier.makeScraper()
-	if err := freshScraper.Login(username, password); err != nil {
+	token, err := notifier.source.Login(userCredentials.User, userCredentials.Pass)
+	if err != nil {
 		return nil, fmt.Errorf("login falló: %w", err)
 	}
-
-	// Guardar nueva sesión antes del scrape (si falla el save, no es fatal).
-	if newSessionBlob, err := freshScraper.SessionBlob(); err == nil {
-		if saveErr := notifier.userRepository.SaveSession(chatID, newSessionBlob); saveErr != nil {
-			log.Printf("⚠️ ChatID %d: no se pudo persistir sesión: %v", chatID, saveErr)
-		}
+	if saveErr := notifier.userRepository.SaveSession(chatID, token); saveErr != nil {
+		log.Printf("⚠️ ChatID %d: no se pudo persistir el token: %v", chatID, saveErr)
 	}
-
-	events, err := freshScraper.FetchEvents()
+	items, err := notifier.source.FetchItems(token, now)
 	if err != nil {
-		return nil, fmt.Errorf("fetch eventos falló: %w", err)
+		return nil, fmt.Errorf("consulta tras el login falló: %w", err)
 	}
-	return events, nil
+	return items, nil
 }
 
-func (notifier *Notifier) formatEvents(events []domain.Event, automaticRound bool) string {
-	var messageBuilder strings.Builder
-	if automaticRound {
-		messageBuilder.WriteString("⏰ *Alerta Automática de Entregas:*\n\n")
-	} else {
-		messageBuilder.WriteString("📚 *Tus Próximos Eventos en Pedco:*\n\n")
+func (notifier *Notifier) markRejected(chatID int64) {
+	log.Printf("🔑 ChatID %d: PEDCO rechazó las credenciales guardadas; en pausa", chatID)
+	if err := notifier.userRepository.MarkCredentialsRejected(chatID); err != nil {
+		log.Printf("⚠️ ChatID %d: no se pudo marcar el rechazo: %v", chatID, err)
 	}
-	for _, event := range events {
-		fmt.Fprintf(&messageBuilder, "%s *%s*\n📘 Materia: %s\n⏰ Vence: %s\n🔗 [Ir a Pedco](%s)\n\n",
-			event.Type, event.Title, event.Course, event.DueDate, event.Link)
+}
+
+func hasPending(items []domain.Item) bool {
+	for _, item := range items {
+		if item.Status != domain.Done {
+			return true
+		}
 	}
-	messageBuilder.WriteString(notifier.signatureBlock)
-	return messageBuilder.String()
+	return false
 }

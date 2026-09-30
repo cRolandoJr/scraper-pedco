@@ -2,35 +2,41 @@ package ports
 
 import (
 	"errors"
+	"time"
 
 	"scraper-pedco/internal/core/domain"
 )
 
-// ErrSessionExpired lo retornan los scrapers cuando la sesión cached murió.
-// El service captura este sentinel para decidir si reloguear.
+// ErrSessionExpired: el token guardado dejó de valer (Moodle respondió
+// invalidtoken o accessexception). El service lo usa para decidir si reloguear.
 var ErrSessionExpired = errors.New("sesión expirada")
 
-// Scraper define el contrato para cualquier fuente de eventos.
-type Scraper interface {
-	Login(username, password string) error
-	FetchEvents() ([]domain.Event, error)
-	LoadSession(sessionBlob string) error
-	SessionBlob() (string, error)
-}
+// ErrBadCredentials: token.php respondió invalidlogin. Solo ese errorcode.
+var ErrBadCredentials = errors.New("PEDCO rechazó el usuario o la contraseña")
 
-type ScraperFactory func() Scraper
+// ErrNoCredentials: no hay fila para el chat, o el usuario guardado está vacío.
+var ErrNoCredentials = errors.New("sin credenciales guardadas")
+
+// Source es la fuente de entregas (la API REST de Moodle).
+type Source interface {
+	Login(username, password string) (token string, err error)
+	FetchItems(token string, now time.Time) ([]domain.Item, error)
+}
 
 // UserRepository abstrae la persistencia de credenciales y sesiones.
 type UserRepository interface {
-	GetUser(chatID int64) (username, password string, err error)
+	GetUser(chatID int64) (UserCredentials, error)
 	GetAllUsers() ([]UserCredentials, error)
-	SaveSession(chatID int64, sessionBlob string) error
+	SaveUser(chatID int64, username, password string) error
+	SaveSession(chatID int64, token string) error
 	ClearSession(chatID int64) error
+	MarkCredentialsRejected(chatID int64) error
 }
 
 type UserCredentials struct {
-	ChatID  int64
-	User    string
-	Pass    string
-	Session string // cookie blob cifrado-descifrado (vacío si sin caché)
+	ChatID        int64
+	User          string
+	Pass          string
+	Session       string // token de Web Services descifrado (vacío si no hay o no se pudo descifrar)
+	CredsRejected bool
 }

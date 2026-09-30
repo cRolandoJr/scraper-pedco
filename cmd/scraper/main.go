@@ -12,9 +12,8 @@ import (
 	"github.com/joho/godotenv"
 	tele "gopkg.in/telebot.v3"
 
-	"scraper-pedco/internal/adapters/pedco"
+	"scraper-pedco/internal/adapters/moodle"
 	"scraper-pedco/internal/adapters/storage"
-	"scraper-pedco/internal/core/ports"
 	"scraper-pedco/internal/core/service"
 )
 
@@ -160,6 +159,11 @@ func main() {
 
 	storage.InitDB()
 
+	argentinaLocation, err := time.LoadLocation("America/Argentina/Buenos_Aires")
+	if err != nil {
+		log.Fatal("❌ Error cargando la zona horaria: ", err)
+	}
+
 	bot, err := tele.NewBot(tele.Settings{
 		Token:  telegramToken,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
@@ -171,9 +175,9 @@ func main() {
 
 	// Wiring dependencias (composición sobre herencia).
 	userRepository := storage.NewRepository()
-	scraperFactory := ports.ScraperFactory(func() ports.Scraper { return pedco.NewPedcoScraper() })
+	source := moodle.NewClient(moodle.DefaultBaseURL, argentinaLocation)
 	messageSender := &telegramSender{bot: bot}
-	notifier := service.NewNotifier(userRepository, scraperFactory, messageSender)
+	notifier := service.NewNotifier(userRepository, source, messageSender, argentinaLocation)
 
 	// Modo oneshot: lo dispara el systemd timer (Persistent=true). Manda una
 	// ronda de avisos y sale; no abre long-poll ni handlers.
@@ -212,14 +216,7 @@ func registerHandlers(bot *tele.Bot, notifier *service.Notifier, flow *loginFlow
 	})
 
 	bot.Handle("/tps", func(context tele.Context) error {
-		message, err := notifier.NotifyOne(context.Sender().ID)
-		if err != nil {
-			return context.Send("❌ No tienes credenciales válidas. Usa /login.")
-		}
-		if message == "" {
-			return context.Send("✅ ¡No tienes entregas pendientes! Relájate.")
-		}
-		return context.Send(message, markdownOpts())
+		return context.Send(notifier.NotifyOne(context.Sender().ID), markdownOpts())
 	})
 
 	bot.Handle(tele.OnText, func(context tele.Context) error {
@@ -235,11 +232,7 @@ func registerHandlers(bot *tele.Bot, notifier *service.Notifier, flow *loginFlow
 			if !found {
 				return context.Send("⚠️ Sesión expirada. Usa /login nuevamente.")
 			}
-			if err := storage.SaveUser(chatID, username, context.Text()); err != nil {
-				log.Println("Error guardando en DB:", err)
-				return context.Send("❌ Hubo un error guardando tus datos.")
-			}
-			return context.Send("🎉 ¡Cuenta vinculada! Usá /tps para ver tus entregas.")
+			return context.Send(notifier.LinkAccount(chatID, username, context.Text()))
 
 		default:
 			return context.Send(helpMessage(), &tele.SendOptions{ParseMode: tele.ModeHTML})

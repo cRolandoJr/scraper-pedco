@@ -38,7 +38,7 @@
 
           env = { CGO_ENABLED = "1"; };
 
-          vendorHash = "sha256-ZuuuMAsj+dM/Vu4dTz6+v9AXcgA7XVAwmaSAjz0qsIQ=";
+          vendorHash = "sha256-poXd7D2QLiTXC23C8Nkj8iDKkWsiuIVNEjavKnv+8UI=";
 
           postInstall = ''
             if [ -f "$out/bin/scraper" ]; then

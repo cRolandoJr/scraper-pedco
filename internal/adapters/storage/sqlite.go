@@ -3,19 +3,23 @@ package storage
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"scraper-pedco/internal/core/ports"
 )
 
 var database *sql.DB
 
 type UserData struct {
-	ChatID  int64
-	User    string
-	Pass    string
-	Session string // blob cifrado de cookies serializadas
+	ChatID        int64
+	User          string
+	Pass          string
+	Session       string // token de Web Services, descifrado
+	CredsRejected bool
 }
 
 func InitDB() {
@@ -23,20 +27,29 @@ func InitDB() {
 		log.Fatal("❌ Error cargando SECRET_KEY: ", err)
 	}
 
-	var err error
-	database, err = sql.Open("sqlite3", "./pedcobot.db")
-	if err != nil {
+	if err := openDatabase("./pedcobot.db"); err != nil {
 		log.Fatal("❌ Error abriendo SQLite: ", err)
+	}
+
+	log.Println("✅ Base de datos SQLite lista y conectada.")
+}
+
+func openDatabase(path string) error {
+	var err error
+	database, err = sql.Open("sqlite3", path)
+	if err != nil {
+		return err
 	}
 
 	createTableStatement := `CREATE TABLE IF NOT EXISTS users (
 		chat_id INTEGER PRIMARY KEY,
 		pedco_user TEXT,
 		pedco_pass TEXT,
-		session_blob TEXT
+		session_blob TEXT,
+		creds_rejected INTEGER NOT NULL DEFAULT 0
 	);`
 	if _, err = database.Exec(createTableStatement); err != nil {
-		log.Fatal("❌ Error creando tabla SQLite: ", err)
+		return fmt.Errorf("creando tabla: %w", err)
 	}
 
 	// Migración suave: agregar columna si DB vieja existía sin session_blob.
@@ -45,8 +58,12 @@ func InitDB() {
 			log.Printf("ℹ️ Migración session_blob: %v", err)
 		}
 	}
-
-	log.Println("✅ Base de datos SQLite lista y conectada.")
+	if _, err := database.Exec(`ALTER TABLE users ADD COLUMN creds_rejected INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			log.Printf("ℹ️ Migración creds_rejected: %v", err)
+		}
+	}
+	return nil
 }
 
 func SaveUser(chatID int64, username, password string) error {
@@ -59,35 +76,46 @@ func SaveUser(chatID int64, username, password string) error {
 		return err
 	}
 
-	// INSERT OR REPLACE elimina session_blob anterior (deseado: creds cambiaron).
+	// INSERT OR REPLACE borra la fila vieja: session_blob queda NULL y
+	// creds_rejected vuelve a su DEFAULT 0 (deseado: creds cambiaron).
 	insertQuery := `INSERT OR REPLACE INTO users(chat_id, pedco_user, pedco_pass, session_blob) VALUES (?, ?, ?, NULL)`
 	_, err = database.Exec(insertQuery, chatID, encryptedUsername, encryptedPassword)
 	return err
 }
 
-func GetUser(chatID int64) (string, string, error) {
-	var encryptedUsername, encryptedPassword string
-	err := database.QueryRow(`SELECT pedco_user, pedco_pass FROM users WHERE chat_id = ?`, chatID).
-		Scan(&encryptedUsername, &encryptedPassword)
+// GetUser devuelve ports.ErrNoCredentials si no hay fila o el usuario está
+// vacío. Un token NULL o ilegible sale vacío, sin error: el flujo cae a login.
+func GetUser(chatID int64) (UserData, error) {
+	var encryptedUsername, encryptedPassword, encryptedSession string
+	userData := UserData{ChatID: chatID}
+	err := database.QueryRow(`SELECT pedco_user, pedco_pass, COALESCE(session_blob, ''), creds_rejected FROM users WHERE chat_id = ?`, chatID).
+		Scan(&encryptedUsername, &encryptedPassword, &encryptedSession, &userData.CredsRejected)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UserData{}, ports.ErrNoCredentials
+	}
 	if err != nil {
-		return "", "", err
+		return UserData{}, err
 	}
 
-	username, err := decrypt(encryptedUsername)
+	userData.User, err = decrypt(encryptedUsername)
 	if err != nil {
-		return "", "", err
+		return UserData{}, err
 	}
-	password, err := decrypt(encryptedPassword)
+	userData.Pass, err = decrypt(encryptedPassword)
 	if err != nil {
-		return "", "", err
+		return UserData{}, err
 	}
-	return username, password, nil
+	if userData.User == "" {
+		return UserData{}, ports.ErrNoCredentials
+	}
+	userData.Session, _ = decrypt(encryptedSession)
+	return userData, nil
 }
 
 func GetAllUsers() ([]UserData, error) {
 	var users []UserData
 
-	rows, err := database.Query(`SELECT chat_id, pedco_user, pedco_pass, COALESCE(session_blob, '') FROM users`)
+	rows, err := database.Query(`SELECT chat_id, pedco_user, pedco_pass, COALESCE(session_blob, ''), creds_rejected FROM users`)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +124,7 @@ func GetAllUsers() ([]UserData, error) {
 	for rows.Next() {
 		var userData UserData
 		var encryptedUsername, encryptedPassword, encryptedSession string
-		if err := rows.Scan(&userData.ChatID, &encryptedUsername, &encryptedPassword, &encryptedSession); err != nil {
+		if err := rows.Scan(&userData.ChatID, &encryptedUsername, &encryptedPassword, &encryptedSession, &userData.CredsRejected); err != nil {
 			continue
 		}
 		userData.User, err = decrypt(encryptedUsername)
@@ -119,7 +147,7 @@ func GetAllUsers() ([]UserData, error) {
 	return users, nil
 }
 
-// SaveSession persiste el blob de cookies cifrado. Se llama tras login exitoso.
+// SaveSession persiste el token cifrado. Se llama tras login exitoso.
 func SaveSession(chatID int64, sessionBlob string) error {
 	encryptedSession, err := encrypt(sessionBlob)
 	if err != nil {
@@ -145,4 +173,10 @@ func DeleteUser(chatID int64) error {
 		return errors.New("usuario no encontrado")
 	}
 	return nil
+}
+
+// MarkCredentialsRejected pausa al usuario hasta el próximo /login (SaveUser).
+func MarkCredentialsRejected(chatID int64) error {
+	_, err := database.Exec(`UPDATE users SET creds_rejected = 1 WHERE chat_id = ?`, chatID)
+	return err
 }

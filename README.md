@@ -9,14 +9,14 @@ Un microservicio de backend desarrollado en **Go** diseñado para automatizar el
 
 
 ##  Características
-- **Scraping Robusto:** Implementado con `Colly`, capaz de manejar sesiones y tokens CSRF de Moodle.
+- **API oficial de Moodle:** usa los Web Services REST de Pedco (el mismo acceso que la app móvil), con el estado de cada entrega: pendiente, hecha, en borrador o todavía cerrada.
 - **Arquitectura Limpia:** Diseñado bajo el patrón de **Arquitectura Hexagonal** (Puertos y Adaptadores), facilitando el mantenimiento y la escalabilidad (ej. cambiar Telegram por WhatsApp o Email sin tocar el núcleo).
 - **Seguridad:** Uso estricto de variables de entorno para proteger credenciales.
 - **Multiplataforma:** Binarios estáticos compilados para Linux y Windows.
 
 ##  Stack Tecnológico
 - **Lenguaje:** Go (Golang)
-- **Scraping:** Colly v2
+- **Datos:** API REST de Moodle (Web Services, `moodle_mobile_app`)
 - **Infraestructura:** Nix / Nix Flakes (Entorno de desarrollo reproducible)
 - **Despliegue:** Systemd Timers (Linux) / Task Scheduler (Windows)
 
