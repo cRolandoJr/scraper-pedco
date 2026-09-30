@@ -1,0 +1,85 @@
+[
+  {
+    "id": 146605,
+    "name": "General",
+    "modules": [
+      {
+        "id": 910433,
+        "name": "Las clases comenzarán la semana del 10/08/2026Conc...",
+        "modname": "label",
+        "uservisible": true,
+        "visible": 1
+      },
+      {
+        "id": 910434,
+        "url": "https://pedco.uncoma.edu.ar/mod/forum/view.php?id=910434",
+        "name": "Avisos",
+        "modname": "forum",
+        "uservisible": true,
+        "visible": 1
+      },
+      {
+        "id": 910436,
+        "url": "https://pedco.uncoma.edu.ar/mod/resource/view.php?id=910436",
+        "name": "Presentación de la Materia",
+        "modname": "resource",
+        "uservisible": true,
+        "visible": 1,
+        "contents": [
+          {
+            "type": "file",
+            "filename": "Presentacion.pdf",
+            "filepath": "/",
+            "filesize": 114495,
+            "fileurl": "https://pedco.uncoma.edu.ar/webservice/pluginfile.php/1295329/mod_resource/content/6/Presentacion.pdf?forcedownload=1",
+            "timecreated": 1771467735,
+            "timemodified": 1771467735,
+            "mimetype": "application/pdf"
+          }
+        ]
+      },
+      {
+        "id": 910438,
+        "url": "https://pedco.uncoma.edu.ar/mod/url/view.php?id=910438",
+        "name": "Instructivo de uso de programa DIA",
+        "modname": "url",
+        "uservisible": true,
+        "visible": 1,
+        "contents": [
+          {
+            "type": "url",
+            "filename": "Instructivo de uso de programa DIA",
+            "filepath": null,
+            "filesize": 0,
+            "fileurl": "https://www.youtube.com/watch?v=4Q_DDVNqAKY",
+            "timecreated": null,
+            "timemodified": 1599678443,
+            "mimetype": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 146609,
+    "name": "Evaluación 1",
+    "modules": [
+      {
+        "id": 910446,
+        "url": "https://pedco.uncoma.edu.ar/mod/assign/view.php?id=910446",
+        "name": "Entrega TP1 - 25/08",
+        "modname": "assign",
+        "uservisible": true,
+        "visible": 1
+      },
+      {
+        "id": 910471,
+        "url": "https://pedco.uncoma.edu.ar/mod/quiz/view.php?id=910471",
+        "name": "Recuperatorio  Parcial 1 -13/10 18:00 hs",
+        "modname": "quiz",
+        "uservisible": false,
+        "visible": 1
+      }
+    ]
+  }
+]

@@ -1,0 +1,68 @@
+[
+  {
+    "id": 146744,
+    "name": "General",
+    "modules": [
+      {
+        "id": 911841,
+        "url": "https://pedco.uncoma.edu.ar/mod/folder/view.php?id=911841",
+        "name": "Bibliografía Adicional",
+        "modname": "folder",
+        "uservisible": true,
+        "visible": 1,
+        "contents": [
+          {
+            "type": "file",
+            "filename": "Necesidades_Tecnologicas_Teletrabajo.pdf",
+            "filepath": "/",
+            "filesize": 215251,
+            "fileurl": "https://pedco.uncoma.edu.ar/webservice/pluginfile.php/1296817/mod_folder/content/4/Necesidades_Tecnologicas_Teletrabajo.pdf?forcedownload=1",
+            "timecreated": 1771468286,
+            "timemodified": 1771468286,
+            "mimetype": "application/pdf"
+          },
+          {
+            "type": "file",
+            "filename": "Sociedad del Conocimiento.pdf",
+            "filepath": "/",
+            "filesize": 120451,
+            "fileurl": "https://pedco.uncoma.edu.ar/webservice/pluginfile.php/1296817/mod_folder/content/4/Sociedad%20del%20Conocimiento.pdf?forcedownload=1",
+            "timecreated": 1771468286,
+            "timemodified": 1771468286,
+            "mimetype": "application/pdf"
+          },
+          {
+            "type": "file",
+            "filename": "Ruta del Negocio.pdf",
+            "filepath": "/",
+            "filesize": 4610545,
+            "fileurl": "https://pedco.uncoma.edu.ar/webservice/pluginfile.php/1296817/mod_folder/content/4/Ruta%20del%20Negocio.pdf?forcedownload=1",
+            "timecreated": 1771468286,
+            "timemodified": 1771468286,
+            "mimetype": "application/pdf"
+          },
+          {
+            "type": "file",
+            "filename": "Planificacion Recursos Empresariales.pdf",
+            "filepath": "/",
+            "filesize": 99744,
+            "fileurl": "https://pedco.uncoma.edu.ar/webservice/pluginfile.php/1296817/mod_folder/content/4/Planificacion%20Recursos%20Empresariales.pdf?forcedownload=1",
+            "timecreated": 1771468286,
+            "timemodified": 1771468286,
+            "mimetype": "application/pdf"
+          },
+          {
+            "type": "file",
+            "filename": "TesisERP.pdf",
+            "filepath": "/",
+            "filesize": 12546480,
+            "fileurl": "https://pedco.uncoma.edu.ar/webservice/pluginfile.php/1296817/mod_folder/content/4/TesisERP.pdf?forcedownload=1",
+            "timecreated": 1771468286,
+            "timemodified": 1771468286,
+            "mimetype": "application/pdf"
+          }
+        ]
+      }
+    ]
+  }
+]

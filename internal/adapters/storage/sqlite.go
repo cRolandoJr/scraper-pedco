@@ -51,6 +51,9 @@ func openDatabase(path string) error {
 	if _, err = database.Exec(createTableStatement); err != nil {
 		return fmt.Errorf("creando tabla: %w", err)
 	}
+	if _, err = database.Exec(createSeenTables); err != nil {
+		return fmt.Errorf("creando tablas de novedades: %w", err)
+	}
 
 	// Migración suave: agregar columna si DB vieja existía sin session_blob.
 	if _, err := database.Exec(`ALTER TABLE users ADD COLUMN session_blob TEXT`); err != nil {
@@ -164,6 +167,11 @@ func ClearSession(chatID int64) error {
 }
 
 func DeleteUser(chatID int64) error {
+	for _, statement := range []string{`DELETE FROM seen WHERE chat_id = ?`, `DELETE FROM seen_baseline WHERE chat_id = ?`} {
+		if _, err := database.Exec(statement, chatID); err != nil {
+			return err
+		}
+	}
 	result, err := database.Exec(`DELETE FROM users WHERE chat_id = ?`, chatID)
 	if err != nil {
 		return err

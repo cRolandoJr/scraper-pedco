@@ -73,25 +73,15 @@ func (client *Client) Login(username, password string) (string, error) {
 }
 
 func (client *Client) FetchItems(token string, now time.Time) ([]domain.Item, error) {
-	var siteInfo struct {
-		UserID int64 `json:"userid"`
-	}
-	if err := client.call(token, "core_webservice_get_site_info", url.Values{}, &siteInfo); err != nil {
-		return nil, err
-	}
-
-	var courses []struct {
-		ID       int64  `json:"id"`
-		FullName string `json:"fullname"`
-	}
-	if err := client.call(token, "core_enrol_get_users_courses", url.Values{"userid": {strconv.FormatInt(siteInfo.UserID, 10)}}, &courses); err != nil {
+	_, courses, err := client.Profile(token)
+	if err != nil {
 		return nil, err
 	}
 	courseNames := map[int64]string{}
 	courseIDs := url.Values{}
 	for index, course := range courses {
-		courseNames[course.ID] = yearPrefix.ReplaceAllString(course.FullName, "")
-		courseIDs.Set(fmt.Sprintf("courseids[%d]", index), strconv.FormatInt(course.ID, 10))
+		courseNames[int64(course.ID)] = course.Name
+		courseIDs.Set(fmt.Sprintf("courseids[%d]", index), strconv.Itoa(course.ID))
 	}
 
 	var assignmentsResponse struct {

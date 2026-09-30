@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 
 	"scraper-pedco/internal/adapters/moodle"
 	"scraper-pedco/internal/adapters/storage"
+	"scraper-pedco/internal/core/ports"
 	"scraper-pedco/internal/core/service"
 )
 
@@ -79,7 +83,44 @@ func (sender *telegramSender) Send(chatID int64, message string) error {
 		ParseMode:             tele.ModeMarkdown,
 		DisableWebPagePreview: true,
 	})
-	return err
+	return classifySendError(err)
+}
+
+func (sender *telegramSender) SendPlain(chatID int64, message string) error {
+	_, err := sender.bot.Send(&tele.User{ID: chatID}, message, &tele.SendOptions{DisableWebPagePreview: true})
+	return classifySendError(err)
+}
+
+// telegramErrorCode: telebot arma las descripciones que no tiene mapeadas (el
+// Markdown rechazado es una) con fmt.Errorf("telegram: %s (%d)"), sin tipo.
+var telegramErrorCode = regexp.MustCompile(`^telegram: .* \((\d{3})\)$`)
+
+// classifySendError: 401 es ports.ErrSendUnauthorized; los demás 4xx salvo 429,
+// permanentes (ports.ErrSendPermanent); red, 429 y 5xx, transitorio. El error sale sin el token del bot.
+func classifySendError(err error) error {
+	if err == nil {
+		return nil
+	}
+	code := 0
+	var floodErr tele.FloodError
+	var apiErr *tele.Error
+	switch {
+	case errors.As(err, &floodErr):
+		code = http.StatusTooManyRequests
+	case errors.As(err, &apiErr):
+		code = apiErr.Code
+	default:
+		if match := telegramErrorCode.FindStringSubmatch(err.Error()); match != nil {
+			code, _ = strconv.Atoi(match[1])
+		}
+	}
+	if code == http.StatusUnauthorized {
+		return fmt.Errorf("%w: %s", ports.ErrSendUnauthorized, sanitize(err))
+	}
+	if code >= 400 && code < 500 && code != http.StatusTooManyRequests {
+		return fmt.Errorf("%w: %s", ports.ErrSendPermanent, sanitize(err))
+	}
+	return errors.New(sanitize(err))
 }
 
 // Healthcheck: cada healthcheckInterval llamamos getMe contra la API de
@@ -177,7 +218,7 @@ func main() {
 	userRepository := storage.NewRepository()
 	source := moodle.NewClient(moodle.DefaultBaseURL, argentinaLocation)
 	messageSender := &telegramSender{bot: bot}
-	notifier := service.NewNotifier(userRepository, source, messageSender, argentinaLocation)
+	notifier := service.NewNotifier(userRepository, userRepository, source, messageSender, argentinaLocation)
 
 	// Modo oneshot: lo dispara el systemd timer (Persistent=true). Manda una
 	// ronda de avisos y sale; no abre long-poll ni handlers.

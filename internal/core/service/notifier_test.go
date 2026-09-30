@@ -26,6 +26,7 @@ var errTimeout = errors.New("Post \"https://pedco/login/token.php\": context dea
 // --- fakes ---
 
 type fakeRepository struct {
+	fakeSeen
 	users         map[int64]ports.UserCredentials
 	order         []int64
 	getUserErr    error
@@ -37,7 +38,7 @@ type fakeRepository struct {
 }
 
 func newFakeRepository(users ...ports.UserCredentials) *fakeRepository {
-	repository := &fakeRepository{users: map[int64]ports.UserCredentials{}, savedSessions: map[int64]string{}}
+	repository := &fakeRepository{users: map[int64]ports.UserCredentials{}, savedSessions: map[int64]string{}, fakeSeen: newFakeSeen()}
 	for _, user := range users {
 		repository.users[user.ChatID] = user
 		repository.order = append(repository.order, user.ChatID)
@@ -89,6 +90,7 @@ func (repository *fakeRepository) MarkCredentialsRejected(chatID int64) error {
 }
 
 type fakeSource struct {
+	newsSource
 	loginResults map[string]loginResult // por username
 	fetchResults map[string]fetchResult // por token
 	loginCalls   []string
@@ -126,16 +128,18 @@ func (source *fakeSource) FetchItems(token string, now time.Time) ([]domain.Item
 type sentMessage struct {
 	chatID  int64
 	message string
+	kind    string // markdown o plain
+	err     error  // lo que devolvió el envío
 }
 
 type fakeSender struct {
 	sent []sentMessage
 	err  error
+	fail func(sentMessage) error // si no es nil, decide el error de cada envío
 }
 
 func (sender *fakeSender) Send(chatID int64, message string) error {
-	sender.sent = append(sender.sent, sentMessage{chatID, message})
-	return sender.err
+	return sender.record(sentMessage{chatID: chatID, message: message, kind: "markdown"})
 }
 
 // --- helpers ---
@@ -148,7 +152,7 @@ func newTestNotifier(t *testing.T, repository *fakeRepository, source *fakeSourc
 	if err != nil {
 		t.Fatalf("zona horaria: %v", err)
 	}
-	notifier := NewNotifier(repository, source, sender, location)
+	notifier := NewNotifier(repository, repository, source, sender, location)
 	notifier.delayBetween = 0
 	notifier.now = func() time.Time { return testNow }
 	return notifier

@@ -1,0 +1,14 @@
+[
+  {
+    "id": 60925,
+    "course": 10325,
+    "type": "news",
+    "name": "Avisos"
+  },
+  {
+    "id": 60926,
+    "course": 10325,
+    "type": "general",
+    "name": "Foro de Consultas"
+  }
+]

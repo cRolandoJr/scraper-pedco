@@ -1,0 +1,47 @@
+{
+  "usergrades": [
+    {
+      "courseid": 10325,
+      "userid": 7,
+      "gradeitems": [
+        {
+          "id": 144101,
+          "itemname": "Entrega TP1 - 25/08",
+          "itemtype": "mod",
+          "graderaw": 2,
+          "gradeformatted": "<i class=\"icon fa fa-check text-success fa-fw inline\"  title=\"Aprobado\" role=\"img\" aria-label=\"Aprobado\"></i>Satisfactorio",
+          "gradedategraded": 1788381797,
+          "cmid": 910446
+        },
+        {
+          "id": 144103,
+          "itemname": "Entrega TP3 - 18/09",
+          "itemtype": "mod",
+          "graderaw": null,
+          "gradeformatted": "-",
+          "gradedategraded": 1790344238,
+          "cmid": 910466
+        },
+        {
+          "id": 144107,
+          "itemname": "Entrega TP 4 - 13/10",
+          "itemtype": "mod",
+          "graderaw": null,
+          "gradeformatted": "-",
+          "gradedategraded": null,
+          "cmid": 910477
+        },
+        {
+          "id": 144100,
+          "itemname": null,
+          "itemtype": "course",
+          "graderaw": null,
+          "gradeformatted": "-",
+          "gradedategraded": 1788381797,
+          "cmid": null
+        }
+      ]
+    }
+  ],
+  "warnings": []
+}

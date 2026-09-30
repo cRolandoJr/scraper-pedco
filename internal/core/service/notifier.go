@@ -21,12 +21,16 @@ const (
 	loginUnreachableMessage    = "💾 Guardé tus datos, pero PEDCO no responde ahora; los pruebo en la próxima ronda."
 )
 
+// MessageSender manda a Telegram. Send va en Markdown legacy; SendPlain sin
+// parse mode. Un error con errors.Is(err, ports.ErrSendPermanent) no se reintenta.
 type MessageSender interface {
 	Send(chatID int64, message string) error
+	SendPlain(chatID int64, message string) error
 }
 
 type Notifier struct {
 	userRepository ports.UserRepository
+	seenRepository ports.SeenRepository
 	source         ports.Source
 	messageSender  MessageSender
 	location       *time.Location
@@ -35,9 +39,10 @@ type Notifier struct {
 	signatureBlock string
 }
 
-func NewNotifier(userRepository ports.UserRepository, source ports.Source, messageSender MessageSender, location *time.Location) *Notifier {
+func NewNotifier(userRepository ports.UserRepository, seenRepository ports.SeenRepository, source ports.Source, messageSender MessageSender, location *time.Location) *Notifier {
 	return &Notifier{
 		userRepository: userRepository,
+		seenRepository: seenRepository,
 		source:         source,
 		messageSender:  messageSender,
 		location:       location,
@@ -69,7 +74,7 @@ func (notifier *Notifier) NotifyAll() {
 
 func (notifier *Notifier) notifyUser(userCredentials ports.UserCredentials) {
 	chatID := userCredentials.ChatID
-	items, err := notifier.fetchItemsFor(userCredentials)
+	items, token, err := notifier.fetchItemsFor(userCredentials)
 	if errors.Is(err, ports.ErrBadCredentials) {
 		notifier.markRejected(chatID)
 		if sendErr := notifier.messageSender.Send(chatID, credentialsRejectedMessage); sendErr != nil {
@@ -81,14 +86,14 @@ func (notifier *Notifier) notifyUser(userCredentials ports.UserCredentials) {
 		log.Printf("⚠️ ChatID %d: %v", chatID, err)
 		return
 	}
-	if !hasPending(items) {
-		return
+	if hasPending(items) {
+		if err := notifier.messageSender.Send(chatID, notifier.formatItems(items, true)); err != nil {
+			log.Printf("⚠️ Falló envío ChatID %d: %v", chatID, err)
+		} else {
+			log.Printf("✅ Notificación enviada a ChatID %d", chatID)
+		}
 	}
-	if err := notifier.messageSender.Send(chatID, notifier.formatItems(items, true)); err != nil {
-		log.Printf("⚠️ Falló envío ChatID %d: %v", chatID, err)
-	} else {
-		log.Printf("✅ Notificación enviada a ChatID %d", chatID)
-	}
+	notifier.notifyNovelties(chatID, token)
 }
 
 // NotifyOne arma la respuesta de /tps.
@@ -103,7 +108,7 @@ func (notifier *Notifier) NotifyOne(chatID int64) string {
 	if userCredentials.CredsRejected {
 		return noCredentialsMessage
 	}
-	items, err := notifier.fetchItemsFor(userCredentials)
+	items, _, err := notifier.fetchItemsFor(userCredentials)
 	if errors.Is(err, ports.ErrBadCredentials) {
 		notifier.markRejected(chatID)
 		return noCredentialsMessage
@@ -141,17 +146,18 @@ func (notifier *Notifier) LinkAccount(chatID int64, username, password string) s
 	}
 }
 
-// fetchItemsFor usa el token guardado; si venció, reloguea UNA vez.
-func (notifier *Notifier) fetchItemsFor(userCredentials ports.UserCredentials) ([]domain.Item, error) {
+// fetchItemsFor usa el token guardado; si venció, reloguea UNA vez. Devuelve
+// el token con el que terminó, que es el que usan las novedades.
+func (notifier *Notifier) fetchItemsFor(userCredentials ports.UserCredentials) ([]domain.Item, string, error) {
 	chatID := userCredentials.ChatID
 	now := notifier.now()
 	if userCredentials.Session != "" {
 		items, err := notifier.source.FetchItems(userCredentials.Session, now)
 		if err == nil {
-			return items, nil
+			return items, userCredentials.Session, nil
 		}
 		if !errors.Is(err, ports.ErrSessionExpired) {
-			return nil, fmt.Errorf("consulta con el token guardado falló: %w", err)
+			return nil, "", fmt.Errorf("consulta con el token guardado falló: %w", err)
 		}
 		log.Printf("🔄 ChatID %d: token vencido, reloguear", chatID)
 		_ = notifier.userRepository.ClearSession(chatID)
@@ -159,16 +165,16 @@ func (notifier *Notifier) fetchItemsFor(userCredentials ports.UserCredentials) (
 
 	token, err := notifier.source.Login(userCredentials.User, userCredentials.Pass)
 	if err != nil {
-		return nil, fmt.Errorf("login falló: %w", err)
+		return nil, "", fmt.Errorf("login falló: %w", err)
 	}
 	if saveErr := notifier.userRepository.SaveSession(chatID, token); saveErr != nil {
 		log.Printf("⚠️ ChatID %d: no se pudo persistir el token: %v", chatID, saveErr)
 	}
 	items, err := notifier.source.FetchItems(token, now)
 	if err != nil {
-		return nil, fmt.Errorf("consulta tras el login falló: %w", err)
+		return nil, "", fmt.Errorf("consulta tras el login falló: %w", err)
 	}
-	return items, nil
+	return items, token, nil
 }
 
 func (notifier *Notifier) markRejected(chatID int64) {
