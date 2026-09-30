@@ -1,7 +1,19 @@
-# SPEC v3 — Novedades: avisos del foro, notas nuevas y material nuevo
+# SPEC v4 — Novedades: avisos del foro, notas nuevas y material nuevo
 
 Rama `feat/novedades` desde `feat/api-moodle`, una vez que esa rama esté cerrada (spec
 alertas v4). Usa su adaptador `internal/adapters/moodle`. Fecha 2026-09-29.
+
+## Cambios v3 → v4 (verificador del 2026-09-30: PASS, con P2 que se corrigen)
+
+- **401 no es un error permanente del mensaje.** Significa que el token del bot fue revocado o
+  es inválido, así que falla todo, no ese mensaje. Clasificarlo como permanente marcaba vistas
+  todas las novedades y las perdía; por ejemplo, el día que se rote el token de Telegram con
+  "Revoke". Pasa a cortar las novedades de la ronda sin marcar nada, igual que un error
+  transitorio.
+- El caso transitorio tiene que verificar que NO hubo reenvío en texto plano: un mutante que
+  reenviaba sobrevivió.
+- El texto del mensaje C se corrige al formato acordado: el encabezado una sola vez y una
+  línea por material.
 
 ## Cambios v2 → v3 (decisión del PO, 2026-09-30)
 
@@ -100,8 +112,11 @@ rechazado (se toman de la documentación de la Bot API: 400 y 413).
   envío, con `INSERT OR IGNORE`. Si el envío sale y la marca falla, el aviso se repite en la
   ronda siguiente. Se acepta: es mejor que perder un aviso.
 - **Fallo de Telegram:**
-  - Transitorio (red, 429, 5xx): no se marca visto y se reintenta en la ronda siguiente.
-  - Permanente (400, 413, otros 4xx):
+  - Transitorio (red, 429, 5xx, y un 4xx cuyo cuerpo no se puede leer): no se marca visto y
+    se reintenta en la ronda siguiente.
+  - 401 (token del bot inválido): se cortan las novedades de ese usuario en esa ronda, sin
+    marcar nada y sin reenviar en texto plano.
+  - Permanente (400, 403, 413 y los demás 4xx salvo 401 y 429):
     - Si era un mensaje con Markdown, se reenvía una vez en texto plano sin escapes.
     - Si esa segunda vez también falla con un error permanente, se marca visto y se loguea.
 - **Un curso que falla siempre** (IPOO en notas) se loguea una línea por ronda y por
@@ -165,9 +180,9 @@ Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
   `gradeformatted` sin HTML (`Satisfactorio`, `8,00`). Cierra con `🔗 Ver notas` →
   `/grade/report/user/index.php?id=<courseid>`. Un mensaje por materia; si sale, se marcan
   todos sus ítems.
-- **C:** `📎 Material nuevo en <materia>: <nombre>`, más `🔗 Abrir` →
-  `/mod/<modname>/view.php?id=<cmid>`. Un mensaje por materia con todos sus materiales
-  nuevos; si sale, se marcan todos.
+- **C:** `📎 Material nuevo en <materia>` una sola vez, y debajo una línea por material:
+  `<nombre> · 🔗 Abrir` → `/mod/<modname>/view.php?id=<cmid>`. Un mensaje por materia; si
+  sale, se marcan todos sus materiales.
 
 ## Criterios de aceptación
 
@@ -189,7 +204,9 @@ Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
   → nada.
 - **N8** Recurso con `uservisible:false` → nada y NO queda visto. Cuando pasa a
   `uservisible:true` → avisa.
-- **N9** Envío con error transitorio → no se marca y la ronda siguiente lo manda. Error
+- **N9** Envío con error transitorio → no se marca, se hace UN solo envío (no hay reenvío en
+  texto plano) y la ronda siguiente lo manda. Error 401 → se cortan las novedades del
+  usuario, sin marcar nada y sin más envíos. Error
   permanente en Markdown → sale
   en texto plano y se marca. Los dos intentos permanentes → se marca y se loguea.
 - **N10** El envío sale y `MarkSeen` falla → la ronda siguiente lo repite (se acepta el
