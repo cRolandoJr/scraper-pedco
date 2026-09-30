@@ -103,6 +103,15 @@ func (notifier *Notifier) formatDate(moment time.Time) string {
 	}
 }
 
+// formatPastDate es formatDate para fechas pasadas: agrega "Ayer"; las alertas no lo usan.
+func (notifier *Notifier) formatPastDate(moment time.Time) string {
+	local := moment.In(notifier.location)
+	if sameDay(local, notifier.now().In(notifier.location).AddDate(0, 0, -1)) {
+		return "Ayer " + local.Format("15:04")
+	}
+	return notifier.formatDate(moment)
+}
+
 func sameDay(first, second time.Time) bool {
 	return first.Year() == second.Year() && first.YearDay() == second.YearDay()
 }

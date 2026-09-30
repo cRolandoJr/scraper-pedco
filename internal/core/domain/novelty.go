@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // Course es una materia del alumno, con el nombre sin el prefijo de año.
 type Course struct {
 	ID         int
@@ -13,7 +15,8 @@ type ForumPost struct {
 	Subject     string
 	Author      string
 	MessageHTML string
-	Link        string // /mod/forum/discuss.php?d=<discussion>
+	Link        string    // /mod/forum/discuss.php?d=<discussion>
+	Published   time.Time // created de la discusión
 }
 
 // GradeItem es una fila del reporte de notas del alumno.

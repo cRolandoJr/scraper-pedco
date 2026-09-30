@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"time"
 
 	"scraper-pedco/internal/core/domain"
 )
@@ -67,6 +68,7 @@ func (client *Client) Forums(token string, courses []domain.Course) (map[int][]d
 				Subject      string `json:"subject"`
 				Message      string `json:"message"`
 				UserFullName string `json:"userfullname"`
+				Created      int64  `json:"created"`
 			} `json:"discussions"`
 		}
 		if err := client.call(token, "mod_forum_get_forum_discussions", url.Values{"forumid": {strconv.Itoa(forum.ID)}}, &response); err != nil {
@@ -81,6 +83,7 @@ func (client *Client) Forums(token string, courses []domain.Course) (map[int][]d
 				Author:      discussion.UserFullName,
 				MessageHTML: discussion.Message,
 				Link:        fmt.Sprintf("%s/mod/forum/discuss.php?d=%d", client.baseURL, discussion.Discussion),
+				Published:   time.Unix(discussion.Created, 0),
 			})
 		}
 	}

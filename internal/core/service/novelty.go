@@ -54,7 +54,7 @@ func (notifier *Notifier) notifyNovelties(chatID int64, token string) {
 			if err := forumErrs[course.ID]; err != nil {
 				return nil, err
 			}
-			return forumCandidates(course, posts[course.ID]), nil
+			return notifier.forumCandidates(course, posts[course.ID]), nil
 		}},
 		{kindGrade, func(course domain.Course) ([]candidate, error) {
 			items, err := notifier.source.Grades(token, course.ID, userID)
@@ -192,12 +192,12 @@ func (notifier *Notifier) sendNovelty(chatID int64, pending novelty) (markSeen, 
 	return true, false
 }
 
-func forumCandidates(course domain.Course, posts []domain.ForumPost) []candidate {
+func (notifier *Notifier) forumCandidates(course domain.Course, posts []domain.ForumPost) []candidate {
 	candidates := make([]candidate, 0, len(posts))
 	for _, post := range posts {
 		candidates = append(candidates, candidate{
 			key:     strconv.Itoa(post.Discussion),
-			novelty: novelty{keys: []string{strconv.Itoa(post.Discussion)}, message: formatForumPost(course, post)},
+			novelty: novelty{keys: []string{strconv.Itoa(post.Discussion)}, message: notifier.formatForumPost(course, post)},
 		})
 	}
 	return candidates
@@ -255,11 +255,12 @@ func cutRunes(text string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func formatForumPost(course domain.Course, post domain.ForumPost) composed {
+func (notifier *Notifier) formatForumPost(course domain.Course, post domain.ForumPost) composed {
 	subject, author := plainText(post.Subject), plainText(post.Author)
 	preview := cutRunes(plainText(post.MessageHTML), forumPreviewRunes) // se corta ANTES de escapar
+	published := notifier.formatPastDate(post.Published)
 	body := func(escape func(string) string) string {
-		text := fmt.Sprintf("📣 Aviso en %s\n%s\n— %s\n\n", escape(course.Name), escape(subject), escape(author))
+		text := fmt.Sprintf("📣 Aviso en %s\n%s\n— %s\n🗓 Publicado %s\n\n", escape(course.Name), escape(subject), escape(author), escape(published))
 		if preview != "" {
 			text += escape(preview) + "\n\n"
 		}

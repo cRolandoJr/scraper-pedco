@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"scraper-pedco/internal/core/domain"
 	"scraper-pedco/internal/core/ports"
@@ -190,8 +191,9 @@ func texts(messages []sentMessage) []string {
 // --- N13: formato ---
 
 func TestNoveltyFormat_Golden(t *testing.T) {
-	forum := formatForumPost(courseBD, domain.ForumPost{
-		Discussion: 563356, Subject: "Parcial_1 *urgente* [BD]", Author: "Enrique Corujo",
+	_, _, _, notifier := newsScenario(t)
+	forum := notifier.formatForumPost(courseBD, domain.ForumPost{
+		Discussion: 563356, Subject: "Parcial_1 *urgente* [BD]", Author: "Enrique Corujo", Published: time.Unix(1790635435, 0),
 		MessageHTML: `<p dir="ltr" style="text-align:left;">Hola &amp; bienvenidos: usen <b>snake_case</b> y *negrita*</p><p>Link: [aquí]</p>`,
 		Link:        pedco + "/mod/forum/discuss.php?d=563356",
 	})
@@ -211,8 +213,9 @@ func TestNoveltyFormat_Golden(t *testing.T) {
 
 // N13: el corte de 400 runas se hace ANTES de escapar: nunca deja una barra colgando.
 func TestNoveltyFormat_CutBeforeEscape(t *testing.T) {
+	_, _, _, notifier := newsScenario(t)
 	text := strings.Repeat("a", 399) + "_bbb"
-	forum := formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: text, Link: pedco})
+	forum := notifier.formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: text, Link: pedco})
 	if !strings.Contains(forum.markdown, "\n"+strings.Repeat("a", 399)+`\_…`+"\n") {
 		t.Errorf("corte markdown mal:\n%s", forum.markdown)
 	}
@@ -220,13 +223,34 @@ func TestNoveltyFormat_CutBeforeEscape(t *testing.T) {
 		t.Errorf("corte plano mal:\n%s", forum.plain)
 	}
 
-	runes := formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: strings.Repeat("ñ", 450), Link: pedco})
+	runes := notifier.formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: strings.Repeat("ñ", 450), Link: pedco})
 	if !strings.Contains(runes.plain, "\n"+strings.Repeat("ñ", 400)+"…\n") {
 		t.Errorf("el corte es por runas, no por bytes:\n%s", runes.plain)
 	}
-	short := formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: strings.Repeat("a", 400), Link: pedco})
+	short := notifier.formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: strings.Repeat("a", 400), Link: pedco})
 	if strings.Contains(short.plain, "…") {
 		t.Errorf("400 runas justas no llevan …")
+	}
+}
+
+// N4: "🗓 Publicado" sale del created en hora de Argentina (testNow = mar 29/09 12:00 AR).
+func TestNoveltyFormat_PublishedDate(t *testing.T) {
+	_, _, _, notifier := newsScenario(t)
+	realCreated := time.Unix(1790635435, 0) // fixture real: lun 28/09 22:43 UTC = 19:43 AR
+	for _, testCase := range []struct {
+		published time.Time
+		want      string
+	}{
+		{testNow.Add(-2 * time.Hour), "🗓 Publicado Hoy 10:00"},
+		{realCreated, "🗓 Publicado Ayer 19:43"},
+		{realCreated.AddDate(0, 0, -2), "🗓 Publicado sáb 26/09 19:43"},
+	} {
+		forum := notifier.formatForumPost(courseBD, domain.ForumPost{Subject: "s", Author: "x", MessageHTML: "t", Link: pedco, Published: testCase.published})
+		for _, message := range []string{forum.markdown, forum.plain} {
+			if !strings.Contains(message, "\n— x\n"+testCase.want+"\n\n") {
+				t.Errorf("quiero %q después del autor:\n%s", testCase.want, message)
+			}
+		}
 	}
 }
 

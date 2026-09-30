@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"scraper-pedco/internal/core/domain"
 	"scraper-pedco/internal/core/ports"
@@ -195,6 +196,9 @@ func TestForums_OnlyNewsAllDiscussions(t *testing.T) {
 	if first.Discussion != 563356 || first.Subject != "Acceso al 1er Parcial" || first.Author != "Enrique Corujo" ||
 		first.Link != fake.baseURL+"/mod/forum/discuss.php?d=563356" || !strings.HasPrefix(first.MessageHTML, "<p dir=\"ltr\"") {
 		t.Errorf("aviso: %+v", first)
+	}
+	if !first.Published.Equal(time.Unix(1790635435, 0)) {
+		t.Errorf("Published = %v, quiero el created del fixture (1790635435)", first.Published)
 	}
 	if len(posts[10327]) != 0 {
 		t.Errorf("IPOO no tiene foros en el fixture: %+v", posts[10327])
