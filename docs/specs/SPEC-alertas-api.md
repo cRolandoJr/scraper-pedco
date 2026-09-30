@@ -1,6 +1,16 @@
-# SPEC v1 — Alertas con estado, vía la API de Moodle
+# SPEC v2 — Alertas con estado, vía la API de Moodle
 
 Rama `feat/api-moodle` desde `main` @ `bd2c07b`. Fecha 2026-09-29.
+
+## Cambios v1 → v2 (lo que tumbó el gate del 2026-09-29)
+
+- Token vencido devuelve `accessexception`, no `invalidtoken` (webservice/lib.php:1176 de
+  Moodle 4.1): ahora los dos son `ErrSessionExpired`.
+- El escape de Markdown legacy no vale dentro de `*…*`: el título sale del negrito.
+- Sin colly se perdía el timeout de 15 s y el oneshot corre con `TimeoutStartUSec=infinity`.
+- La ventana se corta a fin de día y su justificación pasa a ser la medida.
+- Estados de quiz `overdue` y `abandoned`, `teamsubmission`, prefijo `2026-` sin espacios,
+  `GetUser` con token ilegible, y se saca `time/tzdata` (el Go de nixpkgs ya trae zoneinfo).
 
 ## Problema (observado)
 
@@ -8,7 +18,10 @@ Rama `feat/api-moodle` desde `main` @ `bd2c07b`. Fecha 2026-09-29.
    · Administración de Servicios · Vence hoy 23:55" aparece igual antes y después de
    entregarlo.
 2. El bot lee el HTML de `/calendar/view.php?view=upcoming` con colly (`internal/adapters/pedco/scraper.go`).
-   El HTML no trae el estado de la entrega; la API sí.
+   El HTML no trae el estado de la entrega; la API sí. Además esa vista corta en **10 eventos**
+   (`CALENDAR_DEFAULT_UPCOMING_MAXEVENTS`, el usuario no tiene preferencia propia) y 4 de los 10
+   son "Clase Sincrónica", que el parser descarta: hoy se pierden BD TP4 (13/10), AyS TP3 (15/10)
+   y SI P2 (18/10) por conteo, no por fecha.
 3. Un cuestionario aparece dos veces ("Se abre Primer parcial" y "Se cierra Primer
    parcial"), porque el calendario tiene un evento por borde.
 4. Una tarea que todavía no acepta entregas se ve como cualquier otra. Caso real: SI
@@ -33,6 +46,12 @@ Rama `feat/api-moodle` desde `main` @ `bd2c07b`. Fecha 2026-09-29.
 | Quiz sin cierre existe | BD "Coloquio de cierre": `timeclose = 0`, `timeopen = 17/11 18:38` |
 | `login/token.php?service=moodle_mobile_app` da token con usuario y contraseña | medido en curza-sync (sep-2026), no re-medido acá |
 | Parámetros por POST (`wstoken` en el body) funcionan | `tablero.py` lo hace así en cada llamada |
+| Token inválido (basura, cookie vieja, vacío) → `errorcode: invalidtoken`, HTTP 200 | gate, 3 casos |
+| Token vencido → `accessexception` | código de Moodle 4.1 (`webservice/lib.php:1176-1178`, `:895`); no medido en vivo |
+| `mod_assign_get_submission_status` sin `userid` da la misma salida que con él | gate, byte a byte |
+| 0 de 41 tareas con `duedate = 0`; 0 de 41 con `teamsubmission` | gate |
+| 2 de 9 cursos usan `2026-` sin espacios | gate |
+| El Go de nixpkgs resuelve zoneinfo desde el store; el closure del unit trae tzdata | gate |
 | El bot tiene 2 usuarios | `select count(*) from users` sobre `pedcobot.db` (solo lectura) = 2 |
 
 ## Diseño
@@ -47,7 +66,7 @@ type Source interface {
 ```
 
 `ErrSessionExpired` se conserva con el nuevo significado: el token dejó de valer
-(respuesta con `errorcode` `invalidtoken`). `ScraperFactory` desaparece: el adaptador
+(respuesta con `errorcode` `invalidtoken` o `accessexception`). `ScraperFactory` desaparece: el adaptador
 de la API no guarda estado entre llamadas, así que el `Notifier` recibe un `Source` en vez
 de una fábrica.
 
@@ -72,7 +91,9 @@ type Item struct {
 
 Endpoint `https://pedco.uncoma.edu.ar/webservice/rest/server.php`, `moodlewsrestformat=json`,
 todo por POST. La URL base es configurable en el constructor (los tests apuntan a un
-`httptest.Server`).
+`httptest.Server`). El constructor arma su propio `http.Client{Timeout: 15 * time.Second}`
+(el mismo valor que `requestTimeout` del scraper): el oneshot no tiene timeout de systemd y
+un PEDCO colgado lo dejaría colgado para siempre.
 
 `FetchItems(token, now)`:
 
@@ -80,28 +101,37 @@ todo por POST. La URL base es configurable en el constructor (los tests apuntan 
 2. `core_enrol_get_users_courses(userid)`.
 3. `mod_assign_get_assignments(courseids[])` y `mod_quiz_get_quizzes_by_courses(courseids[])`:
    una llamada cada una, con todos los cursos.
-4. **Ventana:** entra el ítem con `now <= Due <= now + 14 días`. Los 14 días son decisión,
-   no medición: el calendario actual mostró TP3 de Adm. Servicios (+14 d) y no SI P2 (+19 d),
-   pero tampoco mostró BD TP4 (+14 d), así que su regla real no está medida. Lo que ya
-   venció no entra (así se comporta hoy).
-5. Solo para los ítems de la ventana: `mod_assign_get_submission_status(assignid, userid)`
-   o `mod_quiz_get_user_attempts(quizid, status=all)`.
+4. **Ventana:** entra el ítem con `now <= Due <= fin del día (hora AR) de now + 14 días`.
+   Los 14 días son decisión (el calendario usa 21 con tope de 10 eventos, ver Problema 2).
+   El corte a fin de día evita que un mismo ítem entre a las 8 y salga a las 20. Lo que ya
+   venció no entra (así se comporta hoy). Un quiz sin cierre usa `Due = timeopen`, así que
+   sale de la ventana en el momento en que abre (igual que el evento "Se abre" de hoy).
+5. Solo para los ítems de la ventana: `mod_assign_get_submission_status(assignid)` (sin
+   `userid`: toma el del token) o `mod_quiz_get_user_attempts(quizid, status=all)`.
+
+Materia: `fullname` sin el prefijo de año, con `^\d{4}\s*-\s*` (hay `2026 - ` y `2026-`).
 
 **Estado** (se evalúa en este orden; gana el primero que aplica):
 
 | tipo | condición | Status |
 |---|---|---|
-| tarea | `submission.status == "submitted"` | Done |
+| tarea | el estado se lee de `lastattempt.teamsubmission` si existe, si no de `lastattempt.submission` | — |
+| tarea | `status == "submitted"` | Done |
 | tarea | `OpensAt > now` | NotOpen |
-| tarea | `submission.status == "draft"` | Draft |
+| tarea | `status == "draft"` | Draft |
 | tarea | cualquier otro (`new`, `reopened`, sin submission) | Pending |
 | quiz | algún intento con `state == "finished"` | Done |
 | quiz | `OpensAt > now` | NotOpen |
-| quiz | algún intento `inprogress` | InProgress |
+| quiz | algún intento `inprogress` u `overdue` | InProgress |
+| quiz | algún intento `abandoned` y ninguno de los anteriores | Unknown |
 | quiz | ninguno | Pending |
 
-**Errores:** si la respuesta es un objeto con `exception`: `errorcode == "invalidtoken"` →
-`ErrSessionExpired`; cualquier otro → error con el `message` de Moodle. Si una llamada
+`abandoned` va a Unknown y no a Pending: con los intentos agotados sería un pendiente falso
+para siempre. Ni `overdue` ni `abandoned` aparecieron en los datos (13 quizzes).
+
+**Errores:** si la respuesta es un objeto con `exception`: `errorcode` `invalidtoken` o
+`accessexception` → `ErrSessionExpired` (el re-login se intenta una sola vez por ronda, como
+hoy en `fetchEventsFor`, así que no hay bucle); cualquier otro → error con el `message` de Moodle. Si una llamada
 de estado de UN ítem falla, el ítem queda `Unknown` y se registra el error en el log (sin el
 token); la ronda sigue. No `Pending`: un "pendiente" falso sobre algo ya entregado invita a
 re-entregar, y un "hecho" falso es peor (fail-closed hacia la duda, no hacia una afirmación).
@@ -118,13 +148,14 @@ quedan como están.
 
 `NotifyOne` (/tps) pasa a usar el token guardado igual que `NotifyAll`: hoy fuerza un
 login completo solo porque `GetUser` no devolvía la sesión. `GetUser` pasa a devolver
-también el token guardado.
+también el token guardado; si el token no se puede descifrar o es NULL, devuelve token vacío
+(no error) y el flujo cae a login, igual que ya hace `GetAllUsers`.
 
 ### Mensaje
 
-Hora de Argentina: `time.LoadLocation("America/Argentina/Buenos_Aires")` con
-`import _ "time/tzdata"` (el binario corre desde `/nix/store`; no depender del zoneinfo del
-sistema). Fechas: `lun 05/10 22:00`; "Hoy 23:55" y "Mañana 23:59" cuando corresponde.
+Hora de Argentina: `time.LoadLocation("America/Argentina/Buenos_Aires")`. Sin
+`time/tzdata`: el Go de nixpkgs ya resuelve zoneinfo desde el store (medido por el gate).
+Los timestamps de Moodle son epoch UTC. Fechas: `lun 05/10 22:00`; "Hoy 23:55" y "Mañana 23:59" cuando corresponde.
 
 Orden: primero lo que no está hecho (Pending, Draft, InProgress, NotOpen, Unknown), ordenado por
 `Due`; después lo hecho, ordenado por `Due`.
@@ -132,13 +163,13 @@ Orden: primero lo que no está hecho (Pending, Draft, InProgress, NotOpen, Unkno
 ```
 ⏰ *Alerta Automática de Entregas:*
 
-🔥 EXAMEN *Primer parcial*
+🔥 Examen: Primer parcial
 📘 Programación Estática y Laboratorio Web
 ⏰ Abre lun 05/10 10:00 · cierra lun 05/10 22:00
 🔒 Todavía no abrió
 🔗 [Ir a Pedco](https://pedco.uncoma.edu.ar/mod/quiz/view.php?id=911187)
 
-📝 Tarea *Entrega Trabajo Práctico Nº 3*
+📝 Tarea: Entrega Trabajo Práctico Nº 3
 📘 Administración de Servicios
 ⏰ Vence mar 13/10 23:55
 ⏳ Pendiente
@@ -162,8 +193,11 @@ cuestionario (problema 3).
 está hecho, no manda nada (dos mensajes por día de ✅ son ruido). `/tps` responde siempre:
 con la lista completa, o con "✅ ¡No tienes entregas pendientes!" si la ventana está vacía.
 
-Los títulos y materias se escapan para Markdown (`*`, `_`, `` ` ``, `[`), porque vienen de la
-cátedra y hoy un `_` en un nombre rompe el formato.
+**Escape (Markdown legacy, `tele.ModeMarkdown`, `main.go:80`).** Telegram no admite escape
+dentro de una entidad. Por eso el título NO va en negrito: `📝 Tarea: <título>`. Todo texto
+que viene de la cátedra (título, materia) se escapa con `\` delante de `_`, `*`, `` ` `` y `[`,
+y siempre queda fuera de entidades. Solo el texto fijo del bot usa `*…*`. Hoy ningún título
+tiene esos caracteres (gate, con control positivo); el escape no está medido contra Telegram.
 
 ## Criterios de aceptación
 
@@ -173,22 +207,32 @@ cátedra y hoy un `_` en un nombre rompe el formato.
 - **C4** Quiz con intento `finished` → ✅; quiz sin intentos y abierto → `⏳ Pendiente`;
   quiz con `timeopen` futuro → `🔒`; quiz con `timeclose == 0` usa `timeopen` como fecha.
 - **C5** Un quiz produce UNA entrada, no dos.
-- **C6** Token guardado inválido (incluye la cookie vieja) → `ErrSessionExpired` →
-  re-login → token nuevo guardado → la ronda sigue con ese usuario.
+- **C6** Token guardado inválido (incluye la cookie vieja) o vencido (`accessexception`) →
+  `ErrSessionExpired` → re-login → token nuevo guardado → la ronda sigue con ese usuario.
+  Si el re-login también falla, se pasa al usuario siguiente (sin reintento).
 - **C7** Ronda automática con todo hecho → no envía. `/tps` con todo hecho → envía la lista.
 - **C8** Fuera de la ventana (vencido, o más de 14 días) → no aparece.
 - **C9** Ningún log ni mensaje de error contiene el token ni la contraseña.
 - **C10** `go.mod` ya no requiere `colly`; `nix build .#pedco-bot` pasa con el
-  `vendorHash` actualizado.
+  `vendorHash` actualizado. El build que cuenta es el de nix-config (otro nixpkgs, por
+  `follows`): lo corre el PO en el rebuild.
 - **C11** Formato del mensaje fijado por un test golden sobre un `[]Item` con los seis
   Status.
 - **C12** Falla la llamada de estado de un ítem → ese ítem sale `❔`, los demás salen bien.
+- **C13** Un servidor que no responde corta en ≤ 15 s con error (test con `httptest` colgado).
+- **C14** Título con `_` y `*` y materia con `[` → el texto sale escapado y fuera de negrito
+  (fixture en el golden de C11).
+- **C15** Quiz `overdue` → `⏳ Intento sin terminar`; quiz solo `abandoned` → `❔`.
+- **C16** Materia `2026-Administracion de Sistemas` → `Administracion de Sistemas`.
 
 ## Fuera de alcance (con gatillo)
 
 - Validar la contraseña en `/login` pidiendo el token en ese momento. *Gatillo:* un usuario
   que guarda credenciales malas y no se entera.
 - Avisar notas nuevas. *Gatillo:* que el PO lo pida.
+- Eventos de curso con "parcial"/"examen"/"recuperatorio" en el título: el parser actual los
+  toma (`scraper.go:148-152`) y la API de tareas y quizzes no. Hoy no hay ninguno en los
+  próximos 90 días (gate). *Gatillo:* que una cátedra anuncie un parcial solo como evento.
 - Mostrar actividades que la cátedra oculta al alumno (el recuperatorio de BD no aparece en
   `mod_quiz_get_quizzes_by_courses`; tampoco aparecía en el calendario de hoy).
 - Deploy: push, `nix flake update pedco-bot` en nix-config y `rebuild` los hace el PO.
