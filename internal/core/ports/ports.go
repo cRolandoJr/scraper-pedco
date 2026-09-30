@@ -25,6 +25,15 @@ var ErrSendPermanent = errors.New("Telegram rechazó el envío")
 // Falla todo envío, no ese mensaje: no se marca nada y se corta la ronda del usuario.
 var ErrSendUnauthorized = errors.New("Telegram rechazó el token del bot")
 
+// Channel es a qué tema del chat va un mensaje; el adaptador de Telegram lo traduce.
+type Channel string
+
+const (
+	ChannelDeliveries Channel = "entregas"
+	ChannelNews       Channel = "novedades"
+	ChannelGeneral    Channel = "" // fuera de tema
+)
+
 // Source es la fuente de entregas y novedades (la API REST de Moodle).
 type Source interface {
 	Login(username, password string) (token string, err error)

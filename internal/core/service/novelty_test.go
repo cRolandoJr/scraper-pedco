@@ -105,8 +105,8 @@ func (seen *fakeSeen) MarkSeen(chatID int64, kind, key string) error {
 	return nil
 }
 
-func (sender *fakeSender) SendPlain(chatID int64, message string) error {
-	return sender.record(sentMessage{chatID: chatID, message: message, kind: "plain"})
+func (sender *fakeSender) SendPlain(chatID int64, channel ports.Channel, message string) error {
+	return sender.record(sentMessage{chatID: chatID, channel: channel, message: message, kind: "plain"})
 }
 
 func (sender *fakeSender) record(message sentMessage) error {

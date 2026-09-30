@@ -23,9 +23,10 @@ const (
 
 // MessageSender manda a Telegram. Send va en Markdown legacy; SendPlain sin
 // parse mode. Un error con errors.Is(err, ports.ErrSendPermanent) no se reintenta.
+// channel elige el tema del chat.
 type MessageSender interface {
-	Send(chatID int64, message string) error
-	SendPlain(chatID int64, message string) error
+	Send(chatID int64, channel ports.Channel, message string) error
+	SendPlain(chatID int64, channel ports.Channel, message string) error
 }
 
 type Notifier struct {
@@ -77,7 +78,7 @@ func (notifier *Notifier) notifyUser(userCredentials ports.UserCredentials) {
 	items, token, err := notifier.fetchItemsFor(userCredentials)
 	if errors.Is(err, ports.ErrBadCredentials) {
 		notifier.markRejected(chatID)
-		if sendErr := notifier.messageSender.Send(chatID, credentialsRejectedMessage); sendErr != nil {
+		if sendErr := notifier.messageSender.Send(chatID, ports.ChannelGeneral, credentialsRejectedMessage); sendErr != nil {
 			log.Printf("⚠️ Falló envío del aviso de credenciales a ChatID %d: %v", chatID, sendErr)
 		}
 		return
@@ -87,7 +88,7 @@ func (notifier *Notifier) notifyUser(userCredentials ports.UserCredentials) {
 		return
 	}
 	if hasPending(items) {
-		if err := notifier.messageSender.Send(chatID, notifier.formatItems(items, true)); err != nil {
+		if err := notifier.messageSender.Send(chatID, ports.ChannelDeliveries, notifier.formatItems(items, true)); err != nil {
 			log.Printf("⚠️ Falló envío ChatID %d: %v", chatID, err)
 		} else {
 			log.Printf("✅ Notificación enviada a ChatID %d", chatID)

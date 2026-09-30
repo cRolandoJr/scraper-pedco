@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,20 +76,112 @@ func (flow *loginFlow) consumePendingUsername(chatID int64) (username string, fo
 	return
 }
 
-// telegramSender implementa service.MessageSender.
-type telegramSender struct{ bot *tele.Bot }
+// TopicRepository guarda el tema de cada (chat, canal). Lo usa solo telegramSender.
+type TopicRepository interface {
+	TopicID(chatID int64, channel ports.Channel) (threadID int, found bool, err error)
+	SaveTopic(chatID int64, channel ports.Channel, threadID int) error // INSERT OR IGNORE; después se relee
+	ForgetTopic(chatID int64, channel ports.Channel) error
+}
 
-func (sender *telegramSender) Send(chatID int64, message string) error {
-	_, err := sender.bot.Send(&tele.User{ID: chatID}, message, &tele.SendOptions{
+type topicKey struct {
+	chatID  int64
+	channel ports.Channel
+}
+
+// telegramSender implementa service.MessageSender. failedTopics recuerda, mientras
+// dura el proceso, los (chat, canal) cuyo tema no se pudo crear.
+type telegramSender struct {
+	bot          *tele.Bot
+	topics       TopicRepository
+	failedTopics map[topicKey]bool
+}
+
+func newTelegramSender(bot *tele.Bot, topics TopicRepository) *telegramSender {
+	return &telegramSender{bot: bot, topics: topics, failedTopics: make(map[topicKey]bool)}
+}
+
+var topicNames = map[ports.Channel]string{
+	ports.ChannelDeliveries: "📚 Entregas",
+	ports.ChannelNews:       "📣 Novedades",
+}
+
+func (sender *telegramSender) Send(chatID int64, channel ports.Channel, message string) error {
+	return sender.deliver(chatID, channel, message, tele.SendOptions{
 		ParseMode:             tele.ModeMarkdown,
 		DisableWebPagePreview: true,
 	})
+}
+
+func (sender *telegramSender) SendPlain(chatID int64, channel ports.Channel, message string) error {
+	return sender.deliver(chatID, channel, message, tele.SendOptions{DisableWebPagePreview: true})
+}
+
+// deliver: un tema borrado se recrea UNA vez; si tampoco sirve, el mensaje sale fuera de tema.
+func (sender *telegramSender) deliver(chatID int64, channel ports.Channel, message string, options tele.SendOptions) error {
+	if channel == ports.ChannelGeneral {
+		return classifySendError(sender.sendTo(chatID, 0, message, options))
+	}
+	threadID := sender.threadFor(chatID, channel)
+	err := sender.sendTo(chatID, threadID, message, options)
+	if threadID == 0 || !isThreadNotFound(err) {
+		return classifySendError(err)
+	}
+	log.Printf("🧵 ChatID %d: el tema %q ya no existe; se recrea", chatID, channel)
+	if forgetErr := sender.topics.ForgetTopic(chatID, channel); forgetErr != nil {
+		log.Printf("⚠️ ChatID %d: no pude olvidar el tema %q: %v", chatID, channel, forgetErr)
+	}
+	threadID = sender.threadFor(chatID, channel)
+	err = sender.sendTo(chatID, threadID, message, options)
+	if threadID != 0 && isThreadNotFound(err) {
+		err = sender.sendTo(chatID, 0, message, options)
+	}
 	return classifySendError(err)
 }
 
-func (sender *telegramSender) SendPlain(chatID int64, message string) error {
-	_, err := sender.bot.Send(&tele.User{ID: chatID}, message, &tele.SendOptions{DisableWebPagePreview: true})
-	return classifySendError(err)
+func (sender *telegramSender) sendTo(chatID int64, threadID int, message string, options tele.SendOptions) error {
+	options.ThreadID = threadID
+	_, err := sender.bot.Send(&tele.User{ID: chatID}, message, &options)
+	return err
+}
+
+// threadFor devuelve el tema del canal, creándolo si no hay; 0 = fuera de tema.
+func (sender *telegramSender) threadFor(chatID int64, channel ports.Channel) int {
+	key := topicKey{chatID: chatID, channel: channel}
+	if sender.failedTopics[key] {
+		return 0
+	}
+	threadID, found, err := sender.topics.TopicID(chatID, channel)
+	if err != nil {
+		log.Printf("⚠️ ChatID %d: no pude leer el tema %q; va fuera de tema: %v", chatID, channel, err)
+		return 0
+	}
+	if found {
+		return threadID
+	}
+	topic, err := sender.bot.CreateTopic(&tele.Chat{ID: chatID}, &tele.Topic{Name: topicNames[channel]})
+	if err != nil || topic == nil || topic.ThreadID == 0 {
+		sender.failedTopics[key] = true
+		reason := "Telegram no devolvió el tema"
+		if err != nil {
+			reason = sanitize(err)
+		}
+		log.Printf("⚠️ ChatID %d: no pude crear el tema %q; va fuera de tema: %s", chatID, channel, reason)
+		return 0
+	}
+	if err := sender.topics.SaveTopic(chatID, channel, topic.ThreadID); err != nil {
+		sender.failedTopics[key] = true
+		log.Printf("⚠️ ChatID %d: no pude guardar el tema %q; se usa sin guardar: %v", chatID, channel, err)
+		return topic.ThreadID
+	}
+	if savedID, found, err := sender.topics.TopicID(chatID, channel); err == nil && found {
+		return savedID
+	}
+	return topic.ThreadID
+}
+
+// isThreadNotFound: telebot no tipa este error; llega como texto.
+func isThreadNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "message thread not found")
 }
 
 // telegramErrorCode: telebot arma las descripciones que no tiene mapeadas (el
@@ -217,7 +310,7 @@ func main() {
 	// Wiring dependencias (composición sobre herencia).
 	userRepository := storage.NewRepository()
 	source := moodle.NewClient(moodle.DefaultBaseURL, argentinaLocation)
-	messageSender := &telegramSender{bot: bot}
+	messageSender := newTelegramSender(bot, userRepository)
 	notifier := service.NewNotifier(userRepository, userRepository, source, messageSender, argentinaLocation)
 
 	// Modo oneshot: lo dispara el systemd timer (Persistent=true). Manda una
@@ -241,23 +334,23 @@ func main() {
 
 func registerHandlers(bot *tele.Bot, notifier *service.Notifier, flow *loginFlow) {
 	bot.Handle("/start", func(context tele.Context) error {
-		return context.Send(welcomeMessage(), markdownOpts())
+		return context.Send(welcomeMessage(), inTopic(context, markdownOpts()))
 	})
 
 	bot.Handle("/login", func(context tele.Context) error {
 		flow.setState(context.Sender().ID, "esperando_usuario")
-		return context.Send("¡Perfecto! Vamos a vincular tu cuenta.\n\n👤 Escríbeme tu **Usuario o Legajo** de Pedco:", markdownOpts())
+		return context.Send("¡Perfecto! Vamos a vincular tu cuenta.\n\n👤 Escríbeme tu **Usuario o Legajo** de Pedco:", inTopic(context, markdownOpts()))
 	})
 
 	bot.Handle("/borrar", func(context tele.Context) error {
 		if err := storage.DeleteUser(context.Sender().ID); err != nil {
-			return context.Send("ℹ️ No tenías datos guardados.")
+			return context.Send("ℹ️ No tenías datos guardados.", inTopic(context, &tele.SendOptions{}))
 		}
-		return context.Send("🗑️ Tus credenciales fueron eliminadas.")
+		return context.Send("🗑️ Tus credenciales fueron eliminadas.", inTopic(context, &tele.SendOptions{}))
 	})
 
 	bot.Handle("/tps", func(context tele.Context) error {
-		return context.Send(notifier.NotifyOne(context.Sender().ID), markdownOpts())
+		return context.Send(notifier.NotifyOne(context.Sender().ID), inTopic(context, markdownOpts()))
 	})
 
 	bot.Handle(tele.OnText, func(context tele.Context) error {
@@ -266,19 +359,25 @@ func registerHandlers(bot *tele.Bot, notifier *service.Notifier, flow *loginFlow
 		case "esperando_usuario":
 			flow.setPendingUsername(chatID, context.Text())
 			flow.setState(chatID, "esperando_pass")
-			return context.Send("✅ Usuario recibido.\n\n🔑 Ahora escríbeme tu <b>Contraseña</b> de Pedco:\n<i>(Se guarda cifrada con AES-256)</i>", &tele.SendOptions{ParseMode: tele.ModeHTML})
+			return context.Send("✅ Usuario recibido.\n\n🔑 Ahora escríbeme tu <b>Contraseña</b> de Pedco:\n<i>(Se guarda cifrada con AES-256)</i>", inTopic(context, &tele.SendOptions{ParseMode: tele.ModeHTML}))
 
 		case "esperando_pass":
 			username, found := flow.consumePendingUsername(chatID)
 			if !found {
-				return context.Send("⚠️ Sesión expirada. Usa /login nuevamente.")
+				return context.Send("⚠️ Sesión expirada. Usa /login nuevamente.", inTopic(context, &tele.SendOptions{}))
 			}
-			return context.Send(notifier.LinkAccount(chatID, username, context.Text()))
+			return context.Send(notifier.LinkAccount(chatID, username, context.Text()), inTopic(context, &tele.SendOptions{}))
 
 		default:
-			return context.Send(helpMessage(), &tele.SendOptions{ParseMode: tele.ModeHTML})
+			return context.Send(helpMessage(), inTopic(context, &tele.SendOptions{ParseMode: tele.ModeHTML}))
 		}
 	})
+}
+
+// inTopic: la respuesta va al tema donde escribió el usuario (0 = fuera de tema).
+func inTopic(context tele.Context, options *tele.SendOptions) *tele.SendOptions {
+	options.ThreadID = context.Message().ThreadID
+	return options
 }
 
 func markdownOpts() *tele.SendOptions {

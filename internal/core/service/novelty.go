@@ -164,7 +164,7 @@ func (notifier *Notifier) compose(kind string, course domain.Course, fresh []can
 // sendNovelty aplica las reglas de fallo de Telegram. markSeen: salió, o se rechazó de forma
 // permanente en todas sus formas. cut: 401, el token del bot no sirve y no se manda nada más.
 func (notifier *Notifier) sendNovelty(chatID int64, pending novelty) (markSeen, cut bool) {
-	err := notifier.messageSender.Send(chatID, pending.message.markdown)
+	err := notifier.messageSender.Send(chatID, ports.ChannelNews, pending.message.markdown)
 	if err == nil {
 		return true, false
 	}
@@ -176,7 +176,7 @@ func (notifier *Notifier) sendNovelty(chatID int64, pending novelty) (markSeen, 
 		log.Printf("⚠️ ChatID %d: falló el envío de la novedad, se reintenta: %v", chatID, err)
 		return false, false
 	}
-	err = notifier.messageSender.SendPlain(chatID, pending.message.plain)
+	err = notifier.messageSender.SendPlain(chatID, ports.ChannelNews, pending.message.plain)
 	if err == nil {
 		return true, false
 	}

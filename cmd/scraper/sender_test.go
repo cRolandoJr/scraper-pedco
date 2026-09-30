@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,17 +18,23 @@ import (
 
 const botToken = "123456:SECRETO-del-bot_xyz"
 
-// fakeTelegram responde lo que diga reply para cada método y guarda lo que llegó.
+// fakeTelegram responde lo que diga reply (o replyTo, si está) y guarda lo que llegó.
+// Un status hangUp corta la conexión sin responder (error de red).
 type fakeTelegram struct {
 	mutex    sync.Mutex
 	reply    func(method string) (status int, body string)
+	replyTo  func(entry recorded) (status int, body string)
 	requests []recorded
 }
+
+const hangUp = -1
 
 type recorded struct {
 	method    string
 	parseMode string
 	text      string
+	threadID  string // message_thread_id; vacío = fuera de tema
+	name      string // nombre del tema en createForumTopic
 }
 
 func (fake *fakeTelegram) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -37,10 +44,25 @@ func (fake *fakeTelegram) ServeHTTP(writer http.ResponseWriter, request *http.Re
 	if strings.Contains(entry.text, `"parse_mode":"Markdown"`) {
 		entry.parseMode = "Markdown"
 	}
+	var params map[string]string
+	if json.Unmarshal(requestBody, &params) == nil {
+		entry.threadID, entry.name = params["message_thread_id"], params["name"]
+	}
 	fake.mutex.Lock()
 	fake.requests = append(fake.requests, entry)
 	fake.mutex.Unlock()
-	status, body := fake.reply(method)
+	var status int
+	var body string
+	if fake.replyTo != nil {
+		status, body = fake.replyTo(entry)
+	} else {
+		status, body = fake.reply(method)
+	}
+	if status == hangUp {
+		connection, _, _ := writer.(http.Hijacker).Hijack()
+		connection.Close()
+		return
+	}
 	writer.WriteHeader(status)
 	fmt.Fprint(writer, body)
 }
@@ -55,17 +77,17 @@ func newTestSender(t *testing.T, fake *fakeTelegram) (*telegramSender, *httptest
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &telegramSender{bot: bot}, server
+	return newTelegramSender(bot, nil), server
 }
 
 func TestTelegramSender_Delivers(t *testing.T) {
 	fake := &fakeTelegram{reply: func(string) (int, string) { return 200, okMessage }}
 	sender, _ := newTestSender(t, fake)
 
-	if err := sender.Send(1, "*hola*"); err != nil {
+	if err := sender.Send(1, ports.ChannelGeneral, "*hola*"); err != nil {
 		t.Fatal(err)
 	}
-	if err := sender.SendPlain(1, "hola_mundo"); err != nil {
+	if err := sender.SendPlain(1, ports.ChannelGeneral, "hola_mundo"); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.requests) != 2 {
@@ -105,8 +127,8 @@ func TestTelegramSender_ClassifiesErrors(t *testing.T) {
 			fake := &fakeTelegram{reply: func(string) (int, string) { return testCase.status, testCase.body }}
 			sender, _ := newTestSender(t, fake)
 			for name, send := range map[string]func() error{
-				"Send":      func() error { return sender.Send(1, "x") },
-				"SendPlain": func() error { return sender.SendPlain(1, "x") },
+				"Send":      func() error { return sender.Send(1, ports.ChannelGeneral, "x") },
+				"SendPlain": func() error { return sender.SendPlain(1, ports.ChannelGeneral, "x") },
 			} {
 				err := send()
 				if err == nil {
@@ -130,8 +152,8 @@ func TestTelegramSender_NetworkErrorIsTransientAndSanitized(t *testing.T) {
 	server.Close()
 
 	for name, err := range map[string]error{
-		"Send":      sender.Send(1, "x"),
-		"SendPlain": sender.SendPlain(1, "x"),
+		"Send":      sender.Send(1, ports.ChannelGeneral, "x"),
+		"SendPlain": sender.SendPlain(1, ports.ChannelGeneral, "x"),
 	} {
 		if err == nil || errors.Is(err, ports.ErrSendPermanent) {
 			t.Errorf("%s: la red caída es transitoria: %v", name, err)

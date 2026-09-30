@@ -127,6 +127,7 @@ func (source *fakeSource) FetchItems(token string, now time.Time) ([]domain.Item
 
 type sentMessage struct {
 	chatID  int64
+	channel ports.Channel
 	message string
 	kind    string // markdown o plain
 	err     error  // lo que devolvió el envío
@@ -138,8 +139,8 @@ type fakeSender struct {
 	fail func(sentMessage) error // si no es nil, decide el error de cada envío
 }
 
-func (sender *fakeSender) Send(chatID int64, message string) error {
-	return sender.record(sentMessage{chatID: chatID, message: message, kind: "markdown"})
+func (sender *fakeSender) Send(chatID int64, channel ports.Channel, message string) error {
+	return sender.record(sentMessage{chatID: chatID, channel: channel, message: message, kind: "markdown"})
 }
 
 // --- helpers ---
