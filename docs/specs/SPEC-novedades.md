@@ -1,7 +1,15 @@
-# SPEC v2 — Novedades: avisos del foro, notas nuevas y material nuevo
+# SPEC v3 — Novedades: avisos del foro, notas nuevas y material nuevo
 
 Rama `feat/novedades` desde `feat/api-moodle`, una vez que esa rama esté cerrada (spec
 alertas v4). Usa su adaptador `internal/adapters/moodle`. Fecha 2026-09-29.
+
+## Cambios v2 → v3 (decisión del PO, 2026-09-30)
+
+El material nuevo avisa con el nombre y el link, y NO descarga ni reenvía el archivo. El PO:
+"dejaría de ser liviano; con solo lectura sirve". Salen `Download`, `SendDocument`, el tope
+de 50 MB y la descarga por POST. Las mediciones de la descarga quedan en la tabla como
+historia. Se queda el saneo del token de TELEGRAM en los errores de `telegramSender`: es un
+defecto demostrado (un test en rojo) del bot ya desplegado, y no depende de la descarga.
 
 ## Cambios v1 → v2 (gate del 2026-09-30: FAIL, 6 P1)
 
@@ -78,12 +86,7 @@ rechazado (se toman de la documentación de la Bot API: 400 y 413).
   cuando el docente la muestra, avisa: para el alumno es nueva.
 - **C:** solo módulos `resource`, `url` y `folder` con `uservisible == true`. Lo restringido
   no entra ni a la base ni a lo visto: cuando se habilita, avisa. La clave es el cmid.
-  - `resource`: si `contents[0].filesize` es de 50 MB o menos (el límite para un bot,
-    según la documentación de Telegram), se descarga `contents[0]` y se manda como
-    documento con el link en el texto.
-  - Si pesa más, o la descarga falla, va solo el link.
-  - Un resource con varios archivos manda el primero, más el link.
-  - `url` y `folder`: solo el link.
+  - Los tres tipos avisan con el nombre y el link al módulo (v3). No se descarga nada.
 - **Mismas rondas que las alertas (8 y 20 h), y mensajes APARTE del de alertas.** Así, si
   la novedad falla, la alerta de entregas no se pierde. Si hay novedades de varios tipos,
   va un mensaje por tipo.
@@ -99,7 +102,6 @@ rechazado (se toman de la documentación de la Bot API: 400 y 413).
 - **Fallo de Telegram:**
   - Transitorio (red, 429, 5xx): no se marca visto y se reintenta en la ronda siguiente.
   - Permanente (400, 413, otros 4xx):
-    - Si era un documento, se manda el mensaje con solo el link.
     - Si era un mensaje con Markdown, se reenvía una vez en texto plano sin escapes.
     - Si esa segunda vez también falla con un error permanente, se marca visto y se loguea.
 - **Un curso que falla siempre** (IPOO en notas) se loguea una línea por ronda y por
@@ -115,10 +117,6 @@ Profile(token string) (userID int, courses []Course, err error)
 Forums(token string, courses []Course) (map[int][]ForumPost, map[int]error) // por curso
 Grades(token string, courseID, userID int) ([]GradeItem, error)
 Materials(token string, courseID int) ([]Material, error) // ya filtrado por uservisible
-Download(token string, file FileRef) ([]byte, error)      // token por POST
-
-// MessageSender gana:
-SendDocument(chatID int64, filename string, data []byte, caption string) error
 // Los errores de envío se distinguen con errors.Is(err, ErrSendPermanent).
 
 // Nuevo:
@@ -130,14 +128,8 @@ type SeenRepository interface {
 }
 ```
 
-**Descarga:**
-- POST a la `fileurl` con `token` en el cuerpo.
-- Un `Content-Type` `application/json`, o un cuerpo que empiece con `{`, es un error de
-  Moodle aunque el HTTP sea 200 (medido).
-- El error que devuelve el adaptador NUNCA incluye la URL ni el cuerpo del pedido: se
-  envuelve con el cmid. Motivo: `*url.Error` imprime la URL entera.
-- El archivo entra en memoria, y está bien: el máximo medido es 14,3 MB, con el tope de
-  50 MB de antes.
+**Saneo del token de Telegram:** los errores de `telegramSender` no incluyen el token del
+bot (telebot lo pone en la URL de la API y `*url.Error` la imprime).
 
 ### Persistencia
 
@@ -173,8 +165,9 @@ Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
   `gradeformatted` sin HTML (`Satisfactorio`, `8,00`). Cierra con `🔗 Ver notas` →
   `/grade/report/user/index.php?id=<courseid>`. Un mensaje por materia; si sale, se marcan
   todos sus ítems.
-- **C:** `📎 Material nuevo en <materia>: <nombre>`. Después va el archivo como documento o
-  el link (`/mod/<modname>/view.php?id=<cmid>`).
+- **C:** `📎 Material nuevo en <materia>: <nombre>`, más `🔗 Abrir` →
+  `/mod/<modname>/view.php?id=<cmid>`. Un mensaje por materia con todos sus materiales
+  nuevos; si sale, se marcan todos.
 
 ## Criterios de aceptación
 
@@ -191,13 +184,13 @@ Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
   El ítem `course` y un `graderaw` nulo → nada. `graderaw = 0` → avisa.
 - **N6** Mismo ítem con otro `graderaw` → avisa de nuevo. Mismo `graderaw` con otro
   `gradedategraded` → nada.
-- **N7** Recurso nuevo ≤ 50 MB → documento. Si pasa de 50 MB por `filesize`, no se descarga
-  y va el link. Si la descarga devuelve un JSON de error con HTTP 200 → link. `url` y
-  `folder` → link. `label`, `quiz` y `assign` → nada.
+- **N7** `resource`, `url` y `folder` nuevos → mensaje C con el nombre y el link, y NINGUNA
+  descarga (el fake del Source falla si se le pide un archivo). `label`, `quiz` y `assign`
+  → nada.
 - **N8** Recurso con `uservisible:false` → nada y NO queda visto. Cuando pasa a
   `uservisible:true` → avisa.
 - **N9** Envío con error transitorio → no se marca y la ronda siguiente lo manda. Error
-  permanente en un documento → sale el link y se marca. Error permanente en Markdown → sale
+  permanente en Markdown → sale
   en texto plano y se marca. Los dos intentos permanentes → se marca y se loguea.
 - **N10** El envío sale y `MarkSeen` falla → la ronda siguiente lo repite (se acepta el
   duplicado) y la ronda no se corta.
@@ -208,11 +201,10 @@ Markdown legacy con el mismo escape de alertas v4 (C14: fuera de negrito).
 - **N13** El texto de foro, el `itemname` y el nombre del material con `_`, `*`, `[` y HTML
   (`<p>`, `&amp;`) salen limpios y escapados (golden). Un corte de 400 runas no deja una
   barra colgando.
-- **N14** Ni el token ni la contraseña aparecen en logs, mensajes, nombres de archivo ni en
-  `err.Error()`. Test: una descarga contra un `httptest` ya cerrado, con un token conocido,
-  y `strings.Contains(err.Error(), token)` debe dar falso.
-- **N15** Tests sin red (`httptest` + fakes). SQLite en `t.TempDir()`. El umbral de 50 MB se
-  puede fijar desde el test.
+- **N14** Ni el token de Moodle, ni el de Telegram, ni la contraseña aparecen en logs,
+  mensajes ni en `err.Error()`. Test: `telegramSender` contra un servidor cerrado, con un
+  token conocido, y `strings.Contains(err.Error(), token)` debe dar falso.
+- **N15** Tests sin red (`httptest` + fakes). SQLite en `t.TempDir()`.
 ## Fuera de alcance (con gatillo)
 
 - Foros de consultas y respuestas a avisos. *Gatillo:* que el PO lo pida.
