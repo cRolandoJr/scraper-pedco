@@ -1,6 +1,20 @@
-# SPEC v3 — Alertas con estado, vía la API de Moodle
+# SPEC v4 — Alertas con estado, vía la API de Moodle
 
 Rama `feat/api-moodle` desde `main` @ `bd2c07b`. Fecha 2026-09-29.
+
+## Cambios v3 → v4 (gate del delta, 2026-09-29: FAIL sin P0)
+
+- **Bloqueo de cuenta (P1, decisión del PO):** Moodle cuenta los logins fallidos y bloquea
+  al llegar al umbral (`moodlelib.php` 4.1, `AUTH_LOGIN_LOCKOUT`), y el bloqueo también sale
+  como `invalidlogin`. Reintentar una contraseña mala en cada ronda podía bloquear la cuenta
+  del alumno. El PO eligió **avisar una vez y pausar** al usuario hasta el próximo `/login`.
+- **Testeabilidad (P1):** la lógica de `/login` y el mapeo de errores de `/tps` estaban en
+  handlers de `main.go`, atados a `tele.Context` y al SQLite. Pasan a `service`, y `SaveUser`
+  entra al puerto.
+- **"Sin credenciales" (P1):** `NotifyOne` envolvía un `err` nil con `%w`, así que ningún
+  `errors.Is` matcheaba, y un error de base caía en "PEDCO caído". Ahora hay un sentinel.
+- Se declaran fuera de alcance los rechazos que no son `invalidlogin` y se agregan los
+  criterios C21–C26.
 
 ## Cambios v2 → v3 (pedido del PO, 2026-09-29)
 
@@ -149,37 +163,79 @@ re-entregar, y un "hecho" falso es peor (fail-closed hacia la duda, no hacia una
 **`Login`:** POST a `/login/token.php` con `username`, `password`, `service=moodle_mobile_app`.
 La respuesta trae `token` o `error`; `error` → error de login.
 
-### Credenciales rechazadas (v3)
+### Credenciales rechazadas (v3, rehecho en v4)
 
-Un error nuevo en `ports`: `ErrBadCredentials`. `Login` lo devuelve SOLO cuando
-`token.php` responde con `errorcode` `invalidlogin`. Cualquier otro error (timeout, HTTP
-distinto de 200, cuerpo no JSON, otro `errorcode`) sigue siendo un error común.
+**Errores nuevos en `ports`:**
+- `ErrBadCredentials`: `Login` lo devuelve SOLO cuando `token.php` responde con `errorcode`
+  `invalidlogin`. Cualquier otro error es un error común: timeout, HTTP distinto de 200,
+  HTTP 200 con cuerpo que no es JSON, JSON sin `errorcode`, u otro `errorcode`.
+- `ErrNoCredentials`: `GetUser` lo devuelve cuando no hay fila (`sql.ErrNoRows`) o el
+  usuario está vacío.
 
-La separación es lo que decide el diseño. El 2026-09-29 PEDCO estuvo caído durante toda
-la sesión (timeout en `token.php` y en `server.php`, con Google respondiendo). Si "no pude
-entrar" disparara el aviso, esa caída les habría dicho a todos los usuarios que su
-contraseña no funciona.
+**Medido por el gate contra el código de Moodle 4.1 (MOODLE_401_STABLE):**
+- `login/token.php:113` lanza `invalidlogin` cuando `authenticate_user_login` devuelve
+  vacío.
+- Ese vacío cubre usuario inexistente, contraseña mala, cuenta suspendida y bloqueo por
+  intentos.
+- La respuesta es HTTP 200 con JSON, porque `token.php` es `AJAX_SCRIPT`.
+- El mantenimiento responde 503 con HTML (`setup.php:340`).
 
-- **Ronda automática:** si el login da `ErrBadCredentials`, se le manda al usuario:
-  `🔑 PEDCO rechazó tu usuario o contraseña guardados (¿la cambiaste?). Mandá /login para
-  actualizarlos. Hasta entonces no te llegan avisos.` El mensaje se repite en cada ronda
-  (8 y 20 h) mientras siga fallando. No se guarda estado nuevo para deduplicar: dos
-  recordatorios por día hasta que lo arregle es lo que se busca. Los demás errores siguen
-  yendo solo al log.
-- **`/tps`:** `ErrBadCredentials` o usuario sin credenciales → `❌ No tienes credenciales
-  válidas. Usa /login.` Cualquier otro error → `⚠️ No pude consultar PEDCO ahora (puede
-  estar caído). Probá en un rato.`
-- **`/login`, después de recibir la contraseña:** primero se guarda, como hoy, y después
-  se llama a `Login`. Con token → se guarda con `SaveSession` → `🔐 Listo, entré a PEDCO
-  con tu cuenta. Usá /tps para ver tus entregas.` Con `ErrBadCredentials` → `❌ PEDCO
-  rechazó ese usuario o contraseña. Probá /login de nuevo.` Con otro error →
-  `💾 Guardé tus datos, pero PEDCO no responde ahora; los pruebo en la próxima ronda.`
-  Guardar antes de probar es a propósito: si PEDCO está caído, igual quedan los datos.
+**Por qué solo `invalidlogin`:** el 2026-09-29 PEDCO estuvo caído toda la sesión (timeout
+en `token.php` y en `server.php`, con Google respondiendo). Con un aviso ante cualquier
+falla, esa caída les habría dicho a todos los usuarios que su contraseña no sirve.
 
-**No medido:** que PEDCO responda `invalidlogin` ante credenciales malas. Está en el
-código de Moodle 4.1 (`login/token.php`), pero no pude medirlo el 2026-09-29 porque PEDCO
-no respondía. Se mide en el E2E con un usuario inexistente, así no suma un intento fallido
-en la cuenta de nadie. Si el código es otro, se ajusta la constante y se anota acá.
+**Pausa (decisión del PO):**
+- Columna nueva `creds_rejected INTEGER NOT NULL DEFAULT 0`, agregada con la misma
+  migración suave que `session_blob` (`ALTER TABLE`, el error de "ya existe" se ignora).
+- `SaveUser` hace `INSERT OR REPLACE`, así que la fila nueva vuelve a 0.
+- Método nuevo del puerto: `MarkCredentialsRejected(chatID)`.
+- `GetAllUsers` y `GetUser` devuelven el flag.
+
+**Comportamiento:**
+
+- **Ronda automática:**
+  - Usuario con `creds_rejected = 1` → se saltea sin llamar a `Login` (solo log).
+  - `Login` da `ErrBadCredentials`, por cualquiera de los dos caminos (sin token, o token
+    vencido → re-login) → `MarkCredentialsRejected` y UNA sola vez este mensaje:
+    `🔑 PEDCO rechazó tu usuario o contraseña guardados (¿la cambiaste?). Mandá /login para
+    actualizarlos. Hasta entonces no te llegan avisos.`
+  - Si el envío falla, se loguea y la ronda sigue. El flag queda puesto igual.
+  - Los otros errores van solo al log, como hoy.
+- **`/tps` (`NotifyOne`):**
+  - `ErrNoCredentials`, error de descifrado de `GetUser`, `creds_rejected = 1` (sin llamar
+    a `Login`) o `ErrBadCredentials` (y además marca el flag) → `❌ No tienes credenciales
+    válidas. Usa /login.`
+  - Cualquier otro error → `⚠️ No pude consultar tus entregas ahora (PEDCO puede estar
+    caído). Probá en un rato.`
+- **`/login`, después de recibir la contraseña:** método nuevo de `Notifier`, que
+  `main.go` solo llama y envía.
+  1. `SaveUser`, como hoy. Si falla → `❌ Hubo un error guardando tus datos.`
+  2. `Login` con un scraper de la misma factory del notifier.
+  3. Según el resultado:
+     - Token → `SaveSession` → `🔐 Listo, entré a PEDCO con tu cuenta. Usá /tps para ver tus
+       entregas.`
+     - `ErrBadCredentials` → `MarkCredentialsRejected` → `❌ PEDCO rechazó ese usuario o
+       contraseña. Probá /login de nuevo.`
+     - Otro error → `💾 Guardé tus datos, pero PEDCO no responde ahora; los pruebo en la
+       próxima ronda.`
+
+  Se guarda antes de probar a propósito: si PEDCO está caído, los datos igual quedan.
+
+**Tests:** van en `package service`, así que pueden fijar `delayBetween` a 0 sin cambiar
+la API. Los fakes son de `UserRepository`, `Scraper` y `MessageSender`.
+
+**Riesgos anotados, sin mitigar:**
+- **Autenticación externa:** si PEDCO autentica contra un servicio externo (LDAP o SSO,
+  no se sabe) y ese servicio se cae, `token.php` también responde `invalidlogin`. Todos
+  quedarían pausados y tendrían que hacer `/login`. Con la pausa, el costo es un `/login`
+  y no un bloqueo. *Gatillo:* que pase una vez.
+- **Carrera entre la ronda y `/login`:** la ronda toma las credenciales al empezar. Si
+  alguien las corrige con `/login` a mitad de ronda, la ronda puede marcar el flag con las
+  credenciales viejas. La probabilidad es baja y se arregla con otro `/login`.
+
+**No medido contra PEDCO:** el `invalidlogin` (estuvo caído). Se mide en el E2E con un
+usuario INEXISTENTE, que según el código sale por el mismo `throw` y no suma intentos
+fallidos en la cuenta de nadie.
 
 ### Persistencia
 
@@ -267,15 +323,23 @@ tiene esos caracteres (gate, con control positivo); el escape no está medido co
 - **C15** Quiz `overdue` → `⏳ Intento sin terminar`; quiz solo `abandoned` → `❔`.
 - **C16** Materia `2026-Administracion de Sistemas` → `Administracion de Sistemas`.
 - **C17** `token.php` responde `{"error":…,"errorcode":"invalidlogin"}` → `Login` devuelve
-  `ErrBadCredentials` (`errors.Is`). Timeout, HTTP 500 u otro `errorcode` → NO es
-  `ErrBadCredentials`.
-- **C18** Ronda automática: un usuario con `ErrBadCredentials` recibe el mensaje 🔑 y la
-  ronda sigue con el siguiente. Un usuario con timeout NO recibe mensaje.
-- **C19** `/tps`: `ErrBadCredentials` → mensaje de `/login`; otro error → mensaje de PEDCO
-  caído.
-- **C20** `/login` con credenciales buenas → token guardado + 🔐; con malas → ❌ y los datos
-  quedan guardados; con PEDCO caído → 💾.
-
+  `ErrBadCredentials` (`errors.Is`). Timeout, HTTP 500, HTTP 200 con HTML, JSON sin
+  `errorcode` u otro `errorcode` → NO es `ErrBadCredentials`.
+- **C18** Ronda: usuario sin token con `ErrBadCredentials` → flag marcado + UN mensaje 🔑 →
+  la ronda sigue con el siguiente. Usuario con timeout → sin mensaje y sin flag.
+- **C19** Ronda: token vencido (`accessexception`) → re-login → `ErrBadCredentials` → flag
+  + 🔑 (el mismo resultado que C18).
+- **C20** Ronda siguiente con el flag puesto → `Login` NO se llama y no hay mensaje.
+- **C21** Falla el envío del 🔑 → se loguea, el flag queda puesto y la ronda sigue.
+- **C22** `/tps`: sin fila, error de descifrado, flag puesto (sin llamar a `Login`) o
+  `ErrBadCredentials` → mensaje de `/login`. Otro error → mensaje de "no pude consultar".
+- **C23** `/login` con credenciales buenas → token guardado + 🔐; con malas → flag + ❌ y
+  los datos guardados; con PEDCO caído → 💾.
+- **C24** `SaveUser` sobre un usuario con el flag puesto → flag en 0 (test contra SQLite en
+  un archivo temporal, nunca `pedcobot.db`).
+- **C25** Una base vieja sin la columna arranca bien y queda con `creds_rejected = 0`.
+- **C26** C9 también vale para el camino de `/login`: ni la contraseña ni el token salen en
+  logs ni mensajes.
 ## Fuera de alcance (con gatillo)
 
 - Avisar notas nuevas. *Gatillo:* que el PO lo pida.
@@ -284,4 +348,10 @@ tiene esos caracteres (gate, con control positivo); el escape no está medido co
   próximos 90 días (gate). *Gatillo:* que una cátedra anuncie un parcial solo como evento.
 - Mostrar actividades que la cátedra oculta al alumno (el recuperatorio de BD no aparece en
   `mod_quiz_get_quizzes_by_courses`; tampoco aparecía en el calendario de hoy).
+- Rechazos que NO son `invalidlogin` y quedan solo en el log. De `token.php`:
+  `usernotconfirmed`, `passwordisexpired`, `restoredaccountresetpassword`. De `server.php`
+  con el token guardado: `wsaccessusersuspended`, `wsaccessuserdeleted`,
+  `wsaccessuserunconfirmed`, `wsaccessuserexpired`, `wsaccessusernologin`,
+  `forcepasswordchangenotice`, `usernotfullysetup`. Ninguno se arregla con `/login`: hay que
+  entrar a la web. *Gatillo:* que le pase a un usuario real.
 - Deploy: push, `nix flake update pedco-bot` en nix-config y `rebuild` los hace el PO.
